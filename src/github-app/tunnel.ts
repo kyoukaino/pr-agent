@@ -41,7 +41,8 @@ async function syncOnce(auth: AppAuth, metricsUrl: string): Promise<boolean> {
   const appOctokit = new Octokit({ auth: token });
   const { data: current } = await appOctokit.rest.apps.getWebhookConfigForApp();
   if (current.url === url) return false;
-  await appOctokit.rest.apps.updateWebhookConfigForApp({ url, content_type: "json" });
+  // Pass the body as `data`: a top-level `url` parameter would replace the request URL itself.
+  await appOctokit.request("PATCH /app/hook/config", { data: { url, content_type: "json" } });
   console.log(pc.green(`✓ Webhook URL updated to ${url}`));
   return true;
 }
