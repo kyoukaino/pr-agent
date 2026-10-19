@@ -4,6 +4,7 @@ import type { GitHubAppConfig } from "./config.js";
 
 export class GitHubAppAuthManager {
   private auth: ReturnType<typeof createAppAuth>;
+  private botLogin?: string;
 
   constructor(private config: GitHubAppConfig) {
     this.auth = createAppAuth({
@@ -18,6 +19,17 @@ export class GitHubAppAuthManager {
   ): Promise<{ octokit: Octokit; token: string }> {
     const { token } = await this.auth({ type: "installation", installationId });
     return { octokit: new Octokit({ auth: token }), token };
+  }
+
+  /** Login the App posts reviews as (`<slug>[bot]`), looked up once with the App's JWT. */
+  public async getBotLogin(): Promise<string> {
+    if (!this.botLogin) {
+      const { token } = await this.auth({ type: "app" });
+      const { data: app } = await new Octokit({ auth: token }).rest.apps.getAuthenticated();
+      if (!app?.slug) throw new Error("Cannot resolve the GitHub App's slug.");
+      this.botLogin = `${app.slug}[bot]`;
+    }
+    return this.botLogin;
   }
 
   /**

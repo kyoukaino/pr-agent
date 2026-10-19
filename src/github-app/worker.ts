@@ -3,6 +3,7 @@ import * as os from "node:os";
 import { Redis } from "ioredis";
 import pc from "picocolors";
 import { PRAgent } from "../index.js";
+import { parseGitDiff } from "../domain/diff-parser.js";
 import { loadConfig } from "../config/loader.js";
 import { TaskCancellationTree } from "../runtime/cancellation.js";
 import type { GitHubAppConfig } from "./config.js";
@@ -10,6 +11,7 @@ import type { PRReviewJobData, PRReviewQueueManager } from "./queue.js";
 import type { GitHubAppAuthManager } from "./auth.js";
 import { checkoutPullRequest } from "./checkout.js";
 import { collectCiContext, fetchCiSnapshot, shouldWaitForCi } from "./ci.js";
+import { fetchIncrementalDiff, loadReviewHistory } from "./history.js";
 
 export class PRReviewWorker {
   private worker: Worker<PRReviewJobData>;
@@ -112,7 +114,31 @@ export class PRReviewWorker {
         ),
       );
 
-      // 3. PR description and CI results give the agent the author's intent and objective evidence.
+      // 3. Earlier reviews by this App: a push after a review is reviewed incrementally, and the
+      // findings already posted are never repeated.
+      const history = await loadReviewHistory(
+        octokit,
+        data.owner,
+        data.repo,
+        data.pull_number,
+        await this.authManager.getBotLogin(),
+      );
+      if (history.lastReviewedCommit === data.commit_id) {
+        console.log(pc.yellow(`[Worker] Commit ${data.commit_id.slice(0, 7)} already reviewed.`));
+        finished = true;
+        return;
+      }
+      const incrementalDiff = history.lastReviewedCommit
+        ? await fetchIncrementalDiff(
+            octokit,
+            data.owner,
+            data.repo,
+            history.lastReviewedCommit,
+            data.commit_id,
+          )
+        : undefined;
+
+      // 4. PR description and CI results give the agent the author's intent and objective evidence.
       const { data: pull } = await octokit.rest.pulls.get({
         owner: data.owner,
         repo: data.repo,
@@ -122,7 +148,7 @@ export class PRReviewWorker {
       const ci = await collectCiContext(octokit, data.owner, data.repo, ciSnapshot, os.tmpdir());
       ciCleanup = ci.cleanup;
 
-      // 4. Fetch raw diff from GitHub API if not pre-cached
+      // 5. Fetch raw diff from GitHub API if not pre-cached
       let rawDiff = data.rawDiff;
       if (!rawDiff) {
         const diffResponse = await octokit.rest.pulls.get({
@@ -140,7 +166,18 @@ export class PRReviewWorker {
         return;
       }
 
-      // 5. Check out the PR head so context tools read the code under review.
+      // Pushes since the last review that touch no file of the PR (e.g. merging the base branch)
+      // leave nothing new to review.
+      if (incrementalDiff !== undefined) {
+        const prPaths = new Set(parseGitDiff(rawDiff).files.map((f) => f.path));
+        if (!parseGitDiff(incrementalDiff).files.some((f) => prPaths.has(f.path))) {
+          console.log(pc.yellow(`[Worker] No PR changes since the last review. Skipping.`));
+          finished = true;
+          return;
+        }
+      }
+
+      // 6. Check out the PR head so context tools read the code under review.
       const checkout = await checkoutPullRequest({
         owner: data.owner,
         repo: data.repo,
@@ -151,13 +188,13 @@ export class PRReviewWorker {
       });
       cleanup = checkout.cleanup;
 
-      // 6. Instantiate PR-Agent with the project configuration (rules, budget, policy)
+      // 7. Instantiate PR-Agent with the project configuration (rules, budget, policy)
       const { config } = await loadConfig({
         overrides: { model: data.model || this.config.model },
       });
       const agent = new PRAgent(config);
 
-      // 7. Run autonomous review; a cancel broadcast aborts it mid-flight
+      // 8. Run autonomous review; a cancel broadcast aborts it mid-flight
       const reviewPayload = await agent.reviewPR({
         owner: data.owner,
         repo: data.repo,
@@ -168,6 +205,11 @@ export class PRReviewWorker {
         background,
         ciResults: ci.summary || undefined,
         ciLogsDir: ci.logsDir,
+        previousFindings: history.findings,
+        incremental:
+          incrementalDiff !== undefined && history.lastReviewedCommit
+            ? { sinceCommit: history.lastReviewedCommit, rawDiff: incrementalDiff }
+            : undefined,
         signal: cancellationTree.signal,
       });
 
@@ -179,7 +221,7 @@ export class PRReviewWorker {
         return;
       }
 
-      // 8. Post review payload directly to GitHub
+      // 9. Post review payload directly to GitHub
       console.log(
         pc.green(
           `[Worker] Posting review to GitHub (${reviewPayload.event}, ${reviewPayload.comments.length} comments)...`,

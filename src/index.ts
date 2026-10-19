@@ -2,7 +2,7 @@ import { Octokit } from "@octokit/rest";
 import { isGeneratedOrLockfile, parseGitDiff } from "./domain/diff-parser.js";
 import { groupTokenBudget, partitionFileGroups } from "./domain/grouping.js";
 import { DiffAnchorRelocator } from "./domain/relocator.js";
-import { buildMainTaskMessages } from "./domain/prompt.js";
+import { buildMainTaskMessages, type PriorFinding } from "./domain/prompt.js";
 import { CI_LOGS_MOUNT } from "./domain/tools.js";
 import { ReviewPayloadAssembler } from "./domain/assembler.js";
 import { DeepSeekLLMClient } from "./llm/client.js";
@@ -33,6 +33,13 @@ export interface ReviewPROptions {
   ciResults?: string;
   /** Directory of failed CI job logs, readable by the agent under CI_LOGS_MOUNT. */
   ciLogsDir?: string;
+  /** Findings posted by earlier reviews of this PR; the agent must not report them again. */
+  previousFindings?: PriorFinding[];
+  /**
+   * Incremental re-review: only `rawDiff` (the changes since `sinceCommit`, the last reviewed
+   * commit) is reviewed. The full PR diff in `rawDiff` above still anchors the comments.
+   */
+  incremental?: { sinceCommit: string; rawDiff: string };
   systemRule?: string;
   publishToGitHub?: boolean;
   githubToken?: string;
@@ -118,6 +125,17 @@ export class PRAgent {
         const prDiff = parseGitDiff(options.rawDiff);
         const relocator = new DiffAnchorRelocator(prDiff);
 
+        // An incremental review covers only what changed since the last reviewed commit, limited to
+        // files the PR changes (merging the base branch brings in others). Anchors still resolve
+        // against the whole PR diff: GitHub accepts review comments only on its lines.
+        const prPaths = new Set(prDiff.files.map((f) => f.path));
+        const reviewFiles = options.incremental
+          ? parseGitDiff(options.incremental.rawDiff).files.filter((f) => prPaths.has(f.path))
+          : prDiff.files;
+        const reviewScope = options.incremental
+          ? `This PR was already reviewed at commit ${options.incremental.sinceCommit.slice(0, 7)}. The diffs below contain only the changes pushed since then; the rest of the PR was reviewed before. Review these changes, reading surrounding code as needed. Anchor findings on R<n> lines: L<n> here are lines of the previously reviewed commit, not of the PR base.`
+          : undefined;
+
         // 3. Pre-flight Size Filtering (exclude single files exceeding warning watermark of max context tokens)
         const maxContextTokens =
           options.budgetConfig?.maxContextTokens || this.config.budget.maxContextTokens || 128_000;
@@ -126,7 +144,7 @@ export class PRAgent {
         const promptTokenCeiling = Math.floor(maxContextTokens * warningWatermark);
 
         const skippedFiles: SkippedFile[] = [];
-        const validDiffs = prDiff.files.filter((f) => {
+        const validDiffs = reviewFiles.filter((f) => {
           let reason: SkippedFile["reason"] | null = null;
           if (isGeneratedOrLockfile(f.path)) reason = "generated_or_lockfile";
           else if (f.hunkRanges.length === 0) reason = "no_text_hunks"; // binary, pure rename, mode change
@@ -214,6 +232,8 @@ export class PRAgent {
             background: options.background,
             ciResults: options.ciResults,
             confirmedComments: allComments,
+            previousFindings: options.previousFindings,
+            reviewScope,
             systemRule: combinedRules.length > 0 ? combinedRules : undefined,
           });
 
@@ -336,6 +356,7 @@ export class PRAgent {
 
 export * from "./config/index.js";
 export * from "./domain/github-types.js";
+export type { PriorFinding } from "./domain/prompt.js";
 export * from "./domain/diff-parser.js";
 export * from "./domain/relocator.js";
 export * from "./domain/grouping.js";
