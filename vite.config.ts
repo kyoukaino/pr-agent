@@ -3,7 +3,8 @@ import { defineConfig } from "vite-plus";
 export default defineConfig({
   pack: {
     entry: ["src/index.ts", "src/cli.ts"],
-    dts: true,
+    // Type declarations are for SDK consumers; the Docker image skips them (slow, memory-hungry).
+    dts: process.env.PR_AGENT_SKIP_DTS !== "1",
     format: ["esm"],
     clean: true,
     // The dashboard server reads ui.html next to the bundle; ship it with the CLI.
