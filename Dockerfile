@@ -14,7 +14,8 @@ RUN vp install --frozen-lockfile
 
 COPY --chown=vp:vp tsconfig.json vite.config.ts pr-agent.config.ts ./
 COPY --chown=vp:vp src/ ./src/
-RUN vp pack
+# The runtime only executes the bundle: skip type declarations (most of the build's time and memory).
+RUN PR_AGENT_SKIP_DTS=1 vp pack
 
 # Export the exact resolved Node.js binary for the runtime stage.
 RUN cp "$(vp env which node | head -1)" /tmp/node
