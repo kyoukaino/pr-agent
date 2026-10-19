@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vite-plus/test";
 import {
   MemoryCompressor,
-  extractSubmittedComments,
+  extractActions,
   partitionMessages,
   serializeTranscript,
 } from "./compression.js";
@@ -99,23 +99,50 @@ describe("trajectory preservation", () => {
     expect(text).not.toContain("thinking"); // reasoning is never replayed
   });
 
-  it("lists only the code_comment calls that were accepted", () => {
-    const msgs = [
+  it("lists calls in order with arguments only, marking recorded comments and failures", () => {
+    const msgs: ChatMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "r1",
+            type: "function",
+            function: { name: "read_file", arguments: '{"path":"src/a.ts","start_line":10}' },
+          },
+          {
+            id: "r2",
+            type: "function",
+            function: { name: "read_file", arguments: '{"path":"src/gone.ts"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "r1", content: "--- src/a.ts (L10-L400 of 900) ---\n10 | ..." },
+      {
+        role: "tool",
+        tool_call_id: "r2",
+        content: "Error executing tool 'read_file': file 'src/gone.ts' does not exist",
+      },
       ...commentRound(
         "c1",
-        { path: "a.ts", line: 3, severity: "P1", title: "Null deref" },
+        { path: "a.ts", line: 3, severity: "P1", title: "Null deref", body: "long body" },
         "Comment recorded successfully on a.ts:3.",
       ),
       ...commentRound(
         "c2",
-        { path: "b.ts", line: 9, severity: "P2", title: "Rejected" },
+        { path: "b.ts", line: 9, severity: "P2", title: "Rejected", body: "long body" },
         "Error executing tool 'code_comment': 'b.ts' is not changed in this PR",
       ),
     ];
-    expect(extractSubmittedComments(msgs)).toEqual(["- [P1] a.ts:3: Null deref"]);
+    expect(extractActions(msgs)).toEqual([
+      '- read_file {"path":"src/a.ts","start_line":10}',
+      `- read_file {"path":"src/gone.ts"} → Error executing tool 'read_file': file 'src/gone.ts' does not exist`,
+      '- code_comment {"path":"a.ts","line":3,"severity":"P1","title":"Null deref"} → recorded',
+      `- code_comment {"path":"b.ts","line":9,"severity":"P2","title":"Rejected"} → Error executing tool 'code_comment': 'b.ts' is not changed in this PR`,
+    ]);
   });
 
-  it("keeps submitted comments verbatim after compression and reports the summary's usage", async () => {
+  it("keeps the trajectory (comments included) after compression and reports the summary's usage", async () => {
     let prompt = "";
     const usage = {
       promptTokens: 10,
@@ -145,8 +172,57 @@ describe("trajectory preservation", () => {
     expect(prompt).toContain('<tool_call name="code_comment">');
     expect(out.usage).toEqual(usage);
     expect(out.messages.length).toBeLessThan(msgs.length);
-    expect(out.messages[1].content).toContain("<comments_already_submitted>");
-    expect(out.messages[1].content).toContain("- [P1] a.ts:3: Null deref");
-    expect(out.messages[2].role).toBe("assistant"); // active zone starts at a whole round
+    // Frozen messages are the very same objects: provider prompt caches keep hitting them.
+    expect(out.messages[0]).toBe(msgs[0]);
+    expect(out.messages[1]).toBe(msgs[1]);
+
+    const memory = out.messages[2];
+    expect(memory.role).toBe("user");
+    expect(memory.memory?.summary).toBe("read a.ts; null deref confirmed");
+    expect(memory.content).toContain(
+      '<actions_taken>\n- code_comment {"path":"a.ts","line":3,"severity":"P1","title":"Null deref"} → recorded\n- read_file {}',
+    );
+    expect(memory.content).toContain('Comments marked "recorded" are already submitted');
+    expect(memory.content).toContain("<previous_review_summary>\nread a.ts; null deref confirmed");
+    expect(memory.content).not.toContain("result 0"); // tool output reaches the summarizer only
+    expect(out.messages[3].role).toBe("assistant"); // active zone starts at a whole round
+  });
+
+  it("merges a later compression into the same memory slot", async () => {
+    const prompts: string[] = [];
+    let n = 0;
+    const client = {
+      chatCompletion: async (messages: ChatMessage[]) => {
+        prompts.push(messages[1].content);
+        return {
+          content: `summary ${++n}`,
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+            cacheHitTokens: 0,
+            costUsd: 0,
+          },
+        };
+      },
+    } as unknown as DeepSeekLLMClient;
+    const compressor = new MemoryCompressor(client);
+
+    const first = await compressor.compress(conversation(6, 40_000), { maxContextTokens: 40_000 });
+    const firstActions = first.messages[2].memory!.actions;
+
+    // More rounds arrive after the first compression, then the context overflows again.
+    const grown = [...first.messages, ...conversation(6, 40_000).slice(2)];
+    const second = await compressor.compress(grown, { maxContextTokens: 40_000 });
+
+    expect(second.messages[0]).toBe(grown[0]);
+    expect(second.messages[1]).toBe(grown[1]);
+    expect(second.messages.filter((m) => m.memory)).toHaveLength(1); // one slot, replaced
+    const merged = second.messages[2].memory!;
+    expect(merged.actions.slice(0, firstActions.length)).toEqual(firstActions); // trajectory kept verbatim
+    expect(merged.actions.length).toBeGreaterThan(firstActions.length);
+    expect(merged.summary).toBe("summary 2");
+    expect(prompts[1]).toContain("<previous_summary>\nsummary 1\n</previous_summary>");
+    expect(prompts[1]).not.toContain("Working memory"); // the old memory message is not re-serialized
   });
 });

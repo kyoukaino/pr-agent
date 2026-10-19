@@ -1,4 +1,4 @@
-import type { ChatMessage } from "../runtime/types.js";
+import type { ChatMessage, CompressedMemory } from "../runtime/types.js";
 import type { DeepSeekLLMClient, LLMResponse } from "../llm/client.js";
 import { countMessagesTokens } from "../runtime/budget.js";
 
@@ -7,8 +7,18 @@ interface Round {
   toolIdxs: number[];
 }
 
+/**
+ * Layout: [0] system, [1] initial task (Frozen, never modified) | [2] memory slot, present once
+ * something was compressed | [historyStart..compressEnd) Compress | [compressEnd..] Active.
+ *
+ * The Frozen messages are never edited, only the memory slot is replaced. Provider prompt caches
+ * that look up at message or block boundaries (OpenAI, Anthropic) as well as plain token-prefix
+ * caches (DeepSeek) therefore keep hitting the system prompt and the diff after every compression.
+ */
 export interface PartitionResult {
   frozenEnd: number;
+  /** First message after the Frozen zone and the memory slot. */
+  historyStart: number;
   compressEnd: number;
   rounds: Round[];
   activeCount: number;
@@ -38,26 +48,30 @@ export function partitionMessages(
   maxContextTokens: number,
   warningThreshold = 0.8,
 ): PartitionResult {
+  const frozenEnd = Math.min(messages.length, 2);
+  const historyStart = messages[frozenEnd]?.memory ? frozenEnd + 1 : frozenEnd;
   const result: PartitionResult = {
-    frozenEnd: Math.min(messages.length, 2),
+    frozenEnd,
+    historyStart,
     compressEnd: messages.length,
     rounds: [],
     activeCount: 0,
   };
 
-  if (messages.length <= 2) {
+  if (messages.length <= historyStart) {
     return result;
   }
 
-  const rounds = groupIntoRounds(messages, 2);
+  const rounds = groupIntoRounds(messages, historyStart);
   result.rounds = rounds;
   if (rounds.length === 0) {
     return result;
   }
 
-  // Recent rounds kept verbatim get half of the warning limit, minus the frozen prompt, so that
-  // frozen + summary + active lands well below the trigger instead of re-triggering immediately.
-  const frozenTokens = countMessagesTokens(messages.slice(0, result.frozenEnd));
+  // Recent rounds kept verbatim get half of the warning limit, minus the frozen prompt and the
+  // current memory, so that frozen + memory + active lands well below the trigger instead of
+  // re-triggering immediately.
+  const frozenTokens = countMessagesTokens(messages.slice(0, historyStart));
   const budget = Math.max(0, Math.floor(maxContextTokens * warningThreshold * 0.5) - frozenTokens);
 
   // Compute how many trailing rounds fit in the budget from the end
@@ -82,7 +96,7 @@ export function partitionMessages(
   if (activeCount >= rounds.length) {
     // Everything fits: nothing to compress. (Returning messages.length here used to make
     // compress() summarize the entire history and wipe the agent's working memory.)
-    result.compressEnd = result.frozenEnd;
+    result.compressEnd = historyStart;
     result.activeCount = rounds.length;
     return result;
   }
@@ -131,29 +145,54 @@ export function serializeTranscript(messages: ChatMessage[]): string {
     .join("\n");
 }
 
+const MAX_ACTION_ARGS_CHARS = 300;
+
 /**
- * Lists the code_comment calls in the range that were accepted, straight from the transcript, so the
- * record of what was already reported survives compression regardless of summary quality.
+ * Reads the trajectory straight from the tool calls of the compressed range, in call order: each
+ * call's name and arguments, accepted comments marked "recorded" and failed calls annotated with
+ * their error. Tool output is not kept here; what it revealed is the summary's job. Being
+ * deterministic, this record survives compression regardless of summary quality.
  */
-export function extractSubmittedComments(messages: ChatMessage[]): string[] {
+export function extractActions(messages: ChatMessage[]): string[] {
   const results = new Map<string, string>();
   for (const m of messages) {
     if (m.role === "tool" && m.tool_call_id) results.set(m.tool_call_id, m.content);
   }
-  const submitted: string[] = [];
+  const actions: string[] = [];
   for (const m of messages) {
     for (const tc of m.tool_calls ?? []) {
-      if (tc.function.name !== "code_comment") continue;
-      if (!results.get(tc.id)?.startsWith("Comment recorded")) continue;
+      const result = results.get(tc.id) ?? "";
+      let args: Record<string, unknown> | null = null;
       try {
-        const a = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-        submitted.push(`- [${a.severity ?? "?"}] ${a.path}:${a.line}: ${a.title ?? ""}`);
+        args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
       } catch {
-        // an unparseable call could not have been recorded
+        // kept verbatim below
       }
+
+      const isComment = tc.function.name === "code_comment";
+      // code_comment bodies are long; location, severity and title identify the finding.
+      const shown =
+        isComment && args
+          ? JSON.stringify({
+              path: args.path,
+              line: args.line,
+              severity: args.severity,
+              title: args.title,
+            })
+          : args
+            ? JSON.stringify(args)
+            : tc.function.arguments;
+      const clipped =
+        shown.length > MAX_ACTION_ARGS_CHARS ? `${shown.slice(0, MAX_ACTION_ARGS_CHARS)}…` : shown;
+      const outcome = result.startsWith("Error")
+        ? ` → ${result.split("\n")[0]}`
+        : isComment && result.startsWith("Comment recorded")
+          ? " → recorded"
+          : "";
+      actions.push(`- ${tc.function.name} ${clipped}${outcome}`);
     }
   }
-  return submitted;
+  return actions;
 }
 
 export interface CompressOptions {
@@ -169,11 +208,27 @@ export interface CompressResult {
   usage?: LLMResponse["usage"];
 }
 
+/** Renders the memory slot's message text from its structured form. */
+export function renderMemory(memory: CompressedMemory): string {
+  const sections = [
+    "Working memory of your earlier turns on this file group (older turns were compressed).",
+  ];
+  if (memory.actions.length > 0) {
+    sections.push(
+      `<actions_taken>\n${memory.actions.join("\n")}\n(Results are summarized below; re-run a call only if you need the exact output. Comments marked "recorded" are already submitted; do NOT submit them again.)\n</actions_taken>`,
+    );
+  }
+  sections.push(`<previous_review_summary>\n${memory.summary}\n</previous_review_summary>`);
+  return sections.join("\n\n");
+}
+
 /**
  * Three-zone Memory Compressor.
- * Keeps the Frozen zone (system prompt + task) intact, replaces the Compress zone with a summary of
- * the trajectory plus a verbatim list of submitted comments, and keeps the Active zone (most recent
- * rounds) intact.
+ * Never modifies the Frozen zone (system prompt + task). Older history is folded into a single
+ * memory message right after it: the extracted trajectory (tool calls in order, submitted comments
+ * included) plus an LLM summary of what the tool results revealed. A later compression merges the
+ * previous memory into a new one, so that slot is the only message ever replaced. The Active zone
+ * (most recent rounds) is kept intact.
  */
 export class MemoryCompressor {
   private llmClient: DeepSeekLLMClient;
@@ -193,20 +248,23 @@ export class MemoryCompressor {
       options.maxContextTokens,
       options.warningThreshold ?? 0.8,
     );
-    if (partition.compressEnd <= partition.frozenEnd) {
+    if (partition.compressEnd <= partition.historyStart) {
       return { messages };
     }
 
-    const compressed = messages.slice(partition.frozenEnd, partition.compressEnd);
+    const previous = messages[partition.frozenEnd]?.memory;
+    const compressed = messages.slice(partition.historyStart, partition.compressEnd);
     const promptMessages: ChatMessage[] = [
       {
         role: "system",
         content:
-          "You compress the working memory of an automated code review agent. From the transcript, write a concise, factual plain-text summary covering: (1) files and line ranges already read and searches already run, with what they revealed; (2) hypotheses verified or ruled out, with the evidence; (3) suspected issues not yet reported and what remains to check. Do not restate submitted comments; they are listed separately. No code fences.",
+          "You compress the working memory of an automated code review agent. From the transcript (and the previous summary, if given, which you must fold in), write one concise, factual plain-text summary of what was learned: (1) facts the code and search results revealed, with file:line references; (2) hypotheses verified or ruled out, with the evidence; (3) suspected issues not yet reported and what remains to check. Do not list which tools were called or which comments were submitted; both are recorded separately. No code fences.",
       },
       {
         role: "user",
-        content: `<transcript>\n${serializeTranscript(compressed)}\n</transcript>\n\nProvide the summary:`,
+        content:
+          (previous ? `<previous_summary>\n${previous.summary}\n</previous_summary>\n\n` : "") +
+          `<transcript>\n${serializeTranscript(compressed)}\n</transcript>\n\nProvide the summary:`,
       },
     ];
 
@@ -214,19 +272,17 @@ export class MemoryCompressor {
       const resp = await this.llmClient.chatCompletion(promptMessages, undefined, options.signal, {
         timeoutMs: options.timeoutMs,
       });
-      const summaryText = resp.content.trim();
-      if (!summaryText) return { messages, usage: resp.usage };
+      const summary = resp.content.trim();
+      if (!summary) return { messages, usage: resp.usage };
 
-      const submitted = extractSubmittedComments(compressed);
-      let memory = `<previous_review_summary>\n${summaryText}\n</previous_review_summary>`;
-      if (submitted.length > 0) {
-        memory += `\n\n<comments_already_submitted>\n${submitted.join("\n")}\n(Do NOT submit these again.)\n</comments_already_submitted>`;
-      }
-
+      const memory: CompressedMemory = {
+        actions: [...(previous?.actions ?? []), ...extractActions(compressed)],
+        summary,
+      };
       return {
         messages: [
-          messages[0],
-          { role: "user", content: `${messages[1].content}\n\n${memory}` },
+          ...messages.slice(0, partition.frozenEnd),
+          { role: "user", content: renderMemory(memory), memory },
           ...messages.slice(partition.compressEnd),
         ],
         usage: resp.usage,

@@ -17,6 +17,16 @@ export interface ChatMessage {
   tool_call_id?: string;
   tool_calls?: ToolCall[];
   reasoning_content?: string;
+  /** Set on the compressed-memory message; internal only, never sent to the API. */
+  memory?: CompressedMemory;
+}
+
+/** Working memory that replaces compressed history; `content` of its message is rendered from it. */
+export interface CompressedMemory {
+  /** Every compressed tool call in order: `- name {args}`, plus ` → recorded` / ` → Error …`. */
+  actions: string[];
+  /** LLM summary of what the compressed tool results revealed. */
+  summary: string;
 }
 
 export interface ToolCall {
