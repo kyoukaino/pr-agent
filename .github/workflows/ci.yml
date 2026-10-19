@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same PR makes the running check obsolete; runs on main are
+# kept so every merged commit gets a completed CI result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # Node.js and pnpm come from package.json (devEngines / packageManager).
+      - uses: voidzero-dev/setup-vp@v1.21.1
+        with:
+          cache: true
+
+      - run: vp install --frozen-lockfile
+      - run: vp check
+      - run: vp run typecheck
+      - run: vp test
+      - run: vp pack
