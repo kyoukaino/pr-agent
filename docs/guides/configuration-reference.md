@@ -116,11 +116,11 @@ export default defineConfig({
 
 ### 3.4 审查策略配置 (`review`)
 
-| 字段                          | 类型    | 默认值 | 说明                                                                                 |
-| :---------------------------- | :------ | :----- | :----------------------------------------------------------------------------------- |
-| `review.minSeverityToBlock`   | string  | `"P1"` | 阻断 PR 并返回 `REQUEST_CHANGES` 的最低缺陷级别。可选 `"P0"`, `"P1"`, `"P2"`, `"P3"` |
-| `review.maxCommentsPerReview` | number  | `30`   | 单次 Review 的评论数上限，超出部分不提交，并在正文中注明省略数量                     |
-| `review.enableAstGrep`        | boolean | `true` | 预留：`@ast-grep/napi` 结构化代码检索开关，当前尚未接入工具集                        |
+| 字段                          | 类型    | 默认值 | 说明                                                                                        |
+| :---------------------------- | :------ | :----- | :------------------------------------------------------------------------------------------ |
+| `review.minSeverityToBlock`   | string  | `"P1"` | 阻断 PR 并返回 `REQUEST_CHANGES` 的最低缺陷级别。可选 `"P0"`, `"P1"`, `"P2"`, `"P3"`        |
+| `review.maxCommentsPerReview` | number  | `30`   | 单次 Review 的评论数上限，按严重程度保留（P0 优先），超出部分不提交，并在正文中注明省略数量 |
+| `review.enableAstGrep`        | boolean | `true` | 预留：`@ast-grep/napi` 结构化代码检索开关，当前尚未接入工具集                               |
 
 ### 3.5 遥测与追踪配置 (`telemetry`)
 

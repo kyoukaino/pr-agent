@@ -39,11 +39,11 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
             type: "string",
             enum: ["P0", "P1", "P2", "P3", "P4"],
             description:
-              "P0=Blocker/Security, P1=Critical Bug, P2=Major Logic/Performance, P3=Minor Defect, P4=Nitpick/Style.",
+              "P0=Blocker/Security, P1=Critical Bug, P2=Major Logic/Performance, P3=Minor Defect, P4=Objective but low-impact issue (typo, grammar error, inaccurate comment or doc). Never use it for subjective style.",
           },
           category: {
             type: "string",
-            enum: ["security", "bug", "performance", "maintainability", "logic"],
+            enum: ["security", "bug", "performance", "maintainability", "logic", "documentation"],
             description: "Category of the finding.",
           },
           title: {
@@ -155,7 +155,14 @@ const GREP_EXCLUDE_GLOBS = [
 ];
 
 const SEVERITIES = new Set(["P0", "P1", "P2", "P3", "P4"]);
-const CATEGORIES = new Set(["security", "bug", "performance", "maintainability", "logic"]);
+const CATEGORIES = new Set([
+  "security",
+  "bug",
+  "performance",
+  "maintainability",
+  "logic",
+  "documentation",
+]);
 
 export interface ToolExecutionContext {
   repoDir: string;

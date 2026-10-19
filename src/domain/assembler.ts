@@ -30,6 +30,27 @@ interface UnanchoredFinding {
   body: string;
 }
 
+const SEVERITY_RANK: Record<EmittedComment["severity"], number> = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+  P4: 4,
+};
+
+/**
+ * The findings a review actually posts: the most severe first (emission order within a severity),
+ * so a burst of minor findings can never push a blocker past the per-review cap.
+ */
+export function selectPostedComments(
+  comments: EmittedComment[],
+  maxCommentsPerReview: number,
+): EmittedComment[] {
+  return [...comments]
+    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+    .slice(0, maxCommentsPerReview);
+}
+
 export class ReviewPayloadAssembler {
   public static assemble(options: AssembleReviewOptions): GitHubCreateReviewParams {
     const {
@@ -45,7 +66,7 @@ export class ReviewPayloadAssembler {
       maxCommentsPerReview = 30,
     } = options;
 
-    const boundedComments = options.comments.slice(0, maxCommentsPerReview);
+    const boundedComments = selectPostedComments(options.comments, maxCommentsPerReview);
     const droppedCount = options.comments.length - boundedComments.length;
 
     // 1. Anchor comments; those without a valid diff line go to the summary body (an invalid
@@ -161,7 +182,7 @@ export class ReviewPayloadAssembler {
     md += `| **P1 (Critical)** | ${counts.P1} | Functional defects, race conditions, memory leaks |\n`;
     md += `| **P2 (Major)** | ${counts.P2} | Missing boundary checks, performance bottlenecks |\n`;
     md += `| **P3 (Minor)** | ${counts.P3} | Maintainability issues, non-blocking logic |\n`;
-    md += `| **P4 (Trivial)** | ${counts.P4} | Code readability & style suggestions |\n\n`;
+    md += `| **P4 (Trivial)** | ${counts.P4} | Typos, inaccurate comments or docs |\n\n`;
 
     if (comments.length === 0) {
       md += `*No actionable defects identified. The change looks clean and well-structured!* \n\n`;

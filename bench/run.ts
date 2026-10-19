@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 import pc from "picocolors";
-import { PRAgent } from "../src/index.js";
+import { PRAgent, selectPostedComments } from "../src/index.js";
 import { flushTelemetry } from "../src/telemetry/otel.js";
 import type { EmittedComment } from "../src/domain/github-types.js";
 import { loadDataset, seededShuffle } from "./datasets.js";
@@ -141,8 +141,8 @@ async function reviewInstance(instance: BenchInstance, outFile: string): Promise
       background: `PR title: ${ws.prTitle}\n\n${ws.prBody.slice(0, 4000)}`.trim(),
     });
 
-    // Score exactly what would be posted: the same per-review cap the assembler applies.
-    const posted = result.findings.slice(0, agent.config.review.maxCommentsPerReview);
+    // Score exactly what would be posted: the same selection the assembler applies.
+    const posted = selectPostedComments(result.findings, agent.config.review.maxCommentsPerReview);
     const record: ReviewRecord = {
       instanceId: instance.id,
       status: "ok",

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vite-plus/test";
-import { ReviewPayloadAssembler } from "./assembler.js";
+import { ReviewPayloadAssembler, selectPostedComments } from "./assembler.js";
 import { parseGitDiff } from "./diff-parser.js";
 import { DiffAnchorRelocator } from "./relocator.js";
 import type { EmittedComment } from "./github-types.js";
@@ -87,5 +87,33 @@ describe("ReviewPayloadAssembler", () => {
 
     expect(payload.event).toBe("COMMENT");
     expect(payload.comments).toHaveLength(1);
+  });
+});
+
+describe("selectPostedComments", () => {
+  const finding = (id: string, severity: EmittedComment["severity"]): EmittedComment => ({
+    id,
+    path: "main.go",
+    line: 2,
+    side: "RIGHT",
+    severity,
+    category: severity === "P4" ? "documentation" : "bug",
+    title: id,
+    body: "",
+  });
+
+  it("keeps the most severe findings when the cap is hit (regression: cap kept emission order)", () => {
+    const comments = [
+      finding("typo-1", "P4"),
+      finding("typo-2", "P4"),
+      finding("logic", "P2"),
+      finding("typo-3", "P4"),
+      finding("backdoor", "P0"),
+    ];
+    expect(selectPostedComments(comments, 3).map((c) => c.id)).toEqual([
+      "backdoor",
+      "logic",
+      "typo-1",
+    ]);
   });
 });

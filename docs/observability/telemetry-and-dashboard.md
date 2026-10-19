@@ -88,7 +88,7 @@ Connected to local SQLite: .pr-agent/traces.db
 
 1. **全局审查大盘 (Metrics Overview)**：
    - 累计审查总数、通过率（APPROVE vs REQUEST_CHANGES）。
-   - 缺陷严重度分布看板（P0 致命阻塞、P1 严重缺陷、P2 主要逻辑、P3 次要缺陷、P4 代码风格）。
+   - 缺陷严重度分布看板（P0 致命阻塞、P1 严重缺陷、P2 主要逻辑、P3 次要缺陷、P4 客观小问题如错别字与不准确的注释）。
    - 累计 Token 消耗与花费（美元，按 DeepSeek 价格与缓存命中计算，与成本预算同一口径）。
 2. **审查记录列表 (Review Explorer)**：
    - 按仓库、PR 编号、Commit SHA 列出历史审查明细与最终结论。
