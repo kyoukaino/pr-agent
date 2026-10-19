@@ -7,7 +7,7 @@ import { PRAgent } from "../src/index.js";
 import { flushTelemetry } from "../src/telemetry/otel.js";
 import type { EmittedComment } from "../src/domain/github-types.js";
 import { loadDataset, seededShuffle } from "./datasets.js";
-import { prepareWorkspace, type RepoMode } from "./workspace.js";
+import { prepareWorkspace, type PreparedWorkspace, type RepoMode } from "./workspace.js";
 import { BenchJudge, createLimiter } from "./judges.js";
 import {
   aggregateAacr,
@@ -109,11 +109,26 @@ function toGenerated(c: EmittedComment): GeneratedComment {
 
 async function reviewInstance(instance: BenchInstance, outFile: string): Promise<ReviewRecord> {
   const started = Date.now();
-  let cleanup: (() => Promise<void>) | undefined;
-  try {
-    const ws = await prepareWorkspace(instance, opts.repoMode);
-    cleanup = ws.cleanup;
 
+  // Preparing the instance is not the agent's job: if the dataset's commits or the PR cannot be
+  // obtained (after the retries inside), the instance is unavailable rather than a missed review.
+  let ws: PreparedWorkspace;
+  try {
+    ws = await prepareWorkspace(instance, opts.repoMode);
+  } catch (err) {
+    const record: ReviewRecord = {
+      instanceId: instance.id,
+      status: "unavailable",
+      error: (err as Error).message,
+      model: opts.reviewModel,
+      durationMs: Date.now() - started,
+      comments: [],
+    };
+    writeJson(outFile, record);
+    return record;
+  }
+
+  try {
     const agent = createAgent();
     const [owner, repo] = instance.repo.split("/");
     const result = await agent.runReview({
@@ -163,7 +178,7 @@ async function reviewInstance(instance: BenchInstance, outFile: string): Promise
     writeJson(outFile, record);
     return record;
   } finally {
-    await cleanup?.().catch(() => undefined);
+    await ws.cleanup().catch(() => undefined);
   }
 }
 
@@ -208,17 +223,26 @@ async function main() {
         pc.yellow("warning: src/ or bench/ has uncommitted changes; scores are not reproducible"),
       );
     }
-    writeJson(path.join(runDir, "run.json"), {
-      dataset: opts.dataset,
-      reviewModel: opts.reviewModel,
-      git: revision,
-      agentConfig,
-      repoMode: opts.repoMode,
-      limit: opts.limit ?? null,
-      seed: opts.limit ? Number(opts.seed) : null,
-      instanceIds: instances.map((i) => i.id),
-      startedAt: new Date().toISOString(),
-    });
+    // A resumed run keeps its original provenance; each resume is appended so mixed code versions
+    // within one run stay visible.
+    const runFile = path.join(runDir, "run.json");
+    const resume = { git: revision, agentConfig, startedAt: new Date().toISOString() };
+    if (fs.existsSync(runFile)) {
+      const existing = readJson<Record<string, unknown> & { resumes?: unknown[] }>(runFile);
+      writeJson(runFile, { ...existing, resumes: [...(existing.resumes ?? []), resume] });
+    } else {
+      writeJson(runFile, {
+        dataset: opts.dataset,
+        reviewModel: opts.reviewModel,
+        git: revision,
+        agentConfig,
+        repoMode: opts.repoMode,
+        limit: opts.limit ?? null,
+        seed: opts.limit ? Number(opts.seed) : null,
+        instanceIds: instances.map((i) => i.id),
+        startedAt: resume.startedAt,
+      });
+    }
 
     const limit = createLimiter(Number(opts.concurrency));
     let done = 0;
@@ -232,7 +256,12 @@ async function main() {
           }
           const rec = await reviewInstance(inst, file);
           done++;
-          const tag = rec.status === "ok" ? pc.green("ok   ") : pc.red("error");
+          const tag =
+            rec.status === "ok"
+              ? pc.green("ok   ")
+              : rec.status === "unavailable"
+                ? pc.yellow("n/a  ")
+                : pc.red("error");
           const cut = rec.groups?.filter((g) => g.stopReason !== "none").length ?? 0;
           console.log(
             `[${done}/${instances.length}] ${tag} ${inst.id}  comments=${rec.comments.length}  ` +
@@ -259,13 +288,21 @@ async function main() {
         "finish the review stage first",
     );
   }
-  // Failed reviews stay in the denominators: they are scored as reviews with no comments, so every
+  // Agent failures stay in the denominators: they are scored as reviews with no comments, so every
   // reference they should have found counts as missed instead of silently dropping hard instances.
-  const records = instances.map((inst) =>
+  // Unavailable instances (could not be prepared) are excluded and listed with their reason.
+  const allRecords = instances.map((inst) =>
     readJson<ReviewRecord>(path.join(reviewsDir, `${safeName(inst.id)}.json`)),
   );
+  const unavailable = allRecords
+    .filter((r) => r.status === "unavailable")
+    .map((r) => ({
+      instanceId: r.instanceId,
+      reason: (r.error ?? "").split("\n")[0].slice(0, 300),
+    }));
+  const records = allRecords.filter((r) => r.status !== "unavailable");
   const reviews = records.filter((r) => r.status === "ok");
-  const failed = records.filter((r) => r.status !== "ok").map((r) => r.instanceId);
+  const failed = records.filter((r) => r.status === "error").map((r) => r.instanceId);
   const byId = new Map(instances.map((i) => [i.id, i]));
 
   const reviewModel = reviews[0]?.model ?? opts.reviewModel;
@@ -321,8 +358,10 @@ async function main() {
     judgeModel: opts.judgeModel,
     evaluatedAt: new Date().toISOString(),
     selectedInstances: instances.length,
-    // Failed reviews are scored as empty reviews (all their references count as missed).
+    // Agent failures are scored as empty reviews (all their references count as missed).
     failedReviewIds: failed,
+    // Not scored: the instance could not be prepared (e.g. dataset commits gone from GitHub).
+    unavailableInstances: unavailable,
     judgeCalls: judge.calls,
     judgeCallFailures: judge.failures,
     review: {
@@ -345,7 +384,8 @@ async function main() {
   console.log(pc.bold(pc.green("\n=== Metrics ===")));
   console.log(JSON.stringify(metrics.scores, null, 2));
   console.log(
-    `reviews ok=${reviews.length} failed=${failed.length}  cost=$${usage.costUsd.toFixed(3)}  ` +
+    `reviews ok=${reviews.length} failed=${failed.length} unavailable=${unavailable.length}  ` +
+      `cost=$${usage.costUsd.toFixed(3)}  ` +
       `judge calls=${judge.calls} failures=${judge.failures}`,
   );
   console.log(`written to ${path.join(evalDir, "metrics.json")}`);

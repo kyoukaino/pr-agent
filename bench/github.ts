@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { withRetry } from "../src/runtime/retry.js";
 
 let cachedToken: string | null | undefined;
 
@@ -28,11 +29,35 @@ export async function githubApi<T>(
   const token = githubToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(`https://api.github.com${apiPath}`, { headers });
-  if (!res.ok) {
-    throw new Error(`GitHub API ${apiPath} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  // Transient failures (5xx, rate limits, network errors) are retried with backoff; renamed or
+  // transferred repositories are followed through GitHub's 301 redirect by fetch itself.
+  return withRetry(
+    async () => {
+      const res = await fetch(`https://api.github.com${apiPath}`, { headers });
+      if (!res.ok) {
+        const body = (await res.text()).slice(0, 300);
+        const rateLimited =
+          res.status === 403 &&
+          (res.headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(body));
+        throw new GitHubApiError(
+          `GitHub API ${apiPath} -> ${res.status}: ${body}`,
+          rateLimited ? 429 : res.status,
+        );
+      }
+      return (accept.includes("json") ? await res.json() : await res.text()) as T;
+    },
+    { maxRetries: 4, initialDelayMs: 2000, maxDelayMs: 30_000 },
+  );
+}
+
+/** Carries the HTTP status so withRetry can tell transient failures from permanent ones. */
+export class GitHubApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
   }
-  return (accept.includes("json") ? await res.json() : await res.text()) as T;
 }
 
 export async function downloadText(url: string): Promise<string> {
