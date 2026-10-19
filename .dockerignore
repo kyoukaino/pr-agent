@@ -12,7 +12,8 @@ pnpm-debug.log*
 Thumbs.db
 coverage
 .env
-.env.local
+.env.*
+*.pem
 bench
 tests
 *.test.ts

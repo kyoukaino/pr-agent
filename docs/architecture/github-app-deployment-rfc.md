@@ -128,8 +128,11 @@ flowchart TD
 | :--------------------- | :----------------------- | :--- | :--------------------------------------------- |
 | **`pr-agent-service`** | `pr-agent:latest` (自建) | 3000 | 承接 Webhook 流量并执行 BullMQ Worker 审查     |
 | **`redis`**            | `redis:7-alpine`         | 6379 | BullMQ 队列、分布式限流器与取消广播 Pub/Sub    |
-| **`phoenix`**          | `arize/phoenix:latest`   | 6006 | OpenInference 协议分布式链路追踪收集与 UI 界面 |
+| **`tunnel`**           | `cloudflare/cloudflared` | —    | Webhook 入口；Quick Tunnel 时服务自动同步 URL  |
+| **`phoenix` (可选)**   | `arize/phoenix:latest`   | 6006 | OpenInference 协议分布式链路追踪收集与 UI 界面 |
 | **`dashboard` (可选)** | 内建集成                 | 6007 | SQLite 轻量无外部依赖审查历史与指标看板        |
+
+Compose 只把服务端口绑定在 `127.0.0.1`，Redis 与 Phoenix 不对外发布；Phoenix 属于 `observability` profile，默认不启动。部署细节见 [部署指南](../guides/deployment-guide.md#2-基于-docker-compose-的一键部署)。
 
 ---
 
@@ -168,13 +171,13 @@ PR_AGENT_MODEL="deepseek-flash"
 # ===================================================
 # 5. 可观测性与追踪
 # ===================================================
-PR_AGENT_TELEMETRY=true
+PR_AGENT_TELEMETRY=false   # true 时配合 --profile observability 启动 Phoenix
 PHOENIX_COLLECTOR_ENDPOINT="http://phoenix:6006/v1/traces"
 
 # ===================================================
 # 6. 队列速率与并发限制
 # ===================================================
-MAX_CONCURRENT_REVIEWS=10
+MAX_CONCURRENT_REVIEWS=1
 MAX_REVIEWS_PER_MINUTE=30
 
 # ===================================================
@@ -182,4 +185,9 @@ MAX_REVIEWS_PER_MINUTE=30
 # ===================================================
 CI_WAIT_TIMEOUT_MS=900000
 CI_POLL_INTERVAL_MS=60000
+
+# ===================================================
+# 8. Cloudflare Quick Tunnel（使用固定域名时置空）
+# ===================================================
+CLOUDFLARED_METRICS_URL=http://tunnel:2000
 ```

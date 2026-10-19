@@ -6,11 +6,12 @@
 
 ## 1. 部署架构方案选择
 
-PR-Agent 服务端由三部分核心基础设施组成：
+PR-Agent 服务端由以下基础设施组成：
 
 1. **PR-Agent 核心常驻服务**：负责 Webhook 验签、代码浅克隆检出、ReAct 执行及结果回传。
 2. **Redis 7**：为 BullMQ 异步队列提供持久化作业存储、限流器状态及过期任务取消广播通道。
-3. **Arize Phoenix / SQLite**：提供链路追踪可观测性面板。
+3. **Cloudflare Tunnel**：把 GitHub Webhook 转发到服务，主机无需开放任何公网端口（也适用于只有 IPv6 的主机：GitHub 只能向 IPv4 地址投递 Webhook）。
+4. **SQLite / Arize Phoenix（可选）**：本地 SQLite 记录每次审查；Phoenix 链路追踪面板通过 `observability` profile 按需启用。
 
 推荐部署方式：
 
@@ -31,10 +32,12 @@ PR-Agent 服务端由三部分核心基础设施组成：
 cp .env.example .env
 ```
 
+GitHub App 的三项凭据可以由创建脚本生成（见 [第 3 节](#3-github-app-创建与权限配置步骤)），把输出文件的内容合并进 `.env` 即可。
+
 核心配置项核验清单：
 
 ```dotenv
-# 服务对外监听端口
+# 服务端口（仅绑定 127.0.0.1，供主机上的健康检查使用）
 PORT=3000
 
 # GitHub App 凭证 (来自 GitHub Developer Settings)
@@ -47,45 +50,85 @@ DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 DEEPSEEK_BASE_URL="https://api.deepseek.com"
 PR_AGENT_MODEL="deepseek-flash"
 
-# 并发与限流
-MAX_CONCURRENT_REVIEWS=10
+# 并发与限流（每个并发审查都持有一份代码检出和一个 Agent，小内存主机保持 1）
+MAX_CONCURRENT_REVIEWS=1
 MAX_REVIEWS_PER_MINUTE=30
 
 # 等待 CI：最长等待时间与轮询间隔（毫秒）；CI_WAIT_TIMEOUT_MS=0 表示不等待
 CI_WAIT_TIMEOUT_MS=900000
 CI_POLL_INTERVAL_MS=60000
+
+# Quick Tunnel：服务自动把 App 的 Webhook URL 更新为隧道当前地址；使用固定域名时置空
+CLOUDFLARED_METRICS_URL=http://tunnel:2000
+
+# 容器内存上限与可观测性
+PR_AGENT_MEM_LIMIT=768m
+PR_AGENT_TELEMETRY=false
 ```
 
-### 2.2 启动容器编排
+### 2.2 构建镜像
 
-执行以下命令即可一键构建并启动服务：
+镜像按 [Vite+ 官方 Docker 指南](https://viteplus.dev/guide/docker) 多阶段构建：用 `ghcr.io/voidzero-dev/vite-plus` 执行 `vp install` 和 `vp pack`，另起一个阶段只安装生产依赖，运行阶段是 `debian:bookworm-slim` 加上 `package.json` 中固定版本的 Node.js 与 git，不包含 vp。
+
+小内存主机（1 GB 左右）上构建很可能因内存不足失败，建议在开发机构建后传过去：
 
 ```bash
-# 启动所有服务 (后台守护进程)
-docker compose up -d --build
+# 开发机（目标主机为 x86_64）
+docker build --platform linux/amd64 -t pr-agent:latest .
+docker save pr-agent:latest | gzip | ssh <host> 'gunzip | docker load'
+```
+
+也可以推送到镜像仓库，并在 `.env` 中设置 `PR_AGENT_IMAGE=ghcr.io/<owner>/pr-agent:<tag>`。
+
+### 2.3 启动容器编排
+
+```bash
+# 启动服务、Redis 与隧道 (后台守护进程)
+docker compose up -d
+
+# 需要 Phoenix 链路追踪面板时（额外约 1 GB 内存，并设置 PR_AGENT_TELEMETRY=true）
+docker compose --profile observability up -d
 
 # 检查容器运行状态
 docker compose ps
 ```
 
-控制台应显示三项服务均处于 Healthy 或 Running 状态：
+默认启动三个容器，除服务端口绑定在 `127.0.0.1:3000` 外不向主机发布任何端口：
 
-- `pr-agent-service` -> 端口 `3000`
-- `pr-agent-redis` -> 端口 `6379`
-- `pr-agent-phoenix` -> 端口 `6006`
+- `pr-agent-service`：Webhook 服务与 Worker（内存上限 `PR_AGENT_MEM_LIMIT`）
+- `pr-agent-redis`：仅容器网络可达，`noeviction` 策略，避免 BullMQ 任务被淘汰
+- `pr-agent-tunnel`：cloudflared
+
+### 2.4 Webhook 入口：Cloudflare Tunnel
+
+- **Quick Tunnel（默认，无需域名）**：cloudflared 分配一个随机的 `*.trycloudflare.com` 地址，每次重启都会变化。服务通过 cloudflared metrics 的 `/quicktunnel` 接口读取当前地址，启动时及之后每分钟检查一次，变化时用 App 身份调用 `PATCH /app/hook/config` 更新 Webhook URL。地址切换的间隙中投递的事件会丢失（可在 App 的 Advanced 页面手动重新投递）；Quick Tunnel 本身也不保证可用性。
+- **Named Tunnel（固定域名，推荐长期使用）**：在 Cloudflare 后台创建隧道，把主机名路由到 `http://pr-agent:3000`；`.env` 中设置 `CLOUDFLARE_TUNNEL_TOKEN`，并把 `CLOUDFLARED_METRICS_URL` 置空；将 compose 中 `tunnel` 的 command 换成 `tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}`；最后在 App 设置中把 Webhook URL 改为 `https://<主机名>/webhook`。
 
 ---
 
 ## 3. GitHub App 创建与权限配置步骤
 
-为了让 PR-Agent 能够自动接收 Webhook 并对 Pull Request 发表审查评论，需要在 GitHub 组织或个人账号下注册一个私有 GitHub App：
+为了让 PR-Agent 能够自动接收 Webhook 并对 Pull Request 发表审查评论，需要在 GitHub 组织或个人账号下注册一个私有 GitHub App。
+
+### 3.0 用脚本创建（推荐）
+
+[`scripts/create-github-app.ts`](../../scripts/create-github-app.ts) 走 GitHub 的 [App Manifest 流程](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest)，一次性配置好下面 3.1–3.3 的权限、事件与 Webhook：
+
+```bash
+node scripts/create-github-app.ts --name pr-agent-yourname          # 个人账号
+node scripts/create-github-app.ts --name pr-agent-yourorg --org yourorg
+```
+
+按提示在浏览器打开本地页面，在 GitHub 上确认创建后，App ID、私钥与 Webhook Secret 会写入 `.env.github-app`（已被 git 与 Docker 忽略），把它合并进部署主机的 `.env` 后删除即可。
+
+Webhook URL 默认是一个无法解析的占位地址：使用 Quick Tunnel 时服务启动后会自动改成隧道地址；使用固定域名时传入 `--webhook-url https://<主机名>/webhook`。**服务部署好之前不要安装 App**，否则安装事件会投递失败。之后在 App 页面点击 **Install App**，选择要审查的仓库（见 3.4 第 3 步）。
 
 ### 3.1 基础设置 (General Settings)
 
 1. 进入 GitHub -> **Settings** -> **Developer settings** -> **GitHub Apps** -> **New GitHub App**。
 2. 填写应用名称（如 `MyOrg-PR-Agent`）。
 3. **Webhook URL**：填写公开公网地址或反向代理域名，格式为：
-   `https://pr-agent.yourcompany.com/webhook`（本地测试可通过 smee.io 或 ngrok 转发）。
+   `https://pr-agent.yourcompany.com/webhook`（没有公网入口时见 [2.4 Cloudflare Tunnel](#24-webhook-入口cloudflare-tunnel)）。
 4. **Webhook Secret**：生成一个高强度随机字符串，必须与 `.env` 中的 `GITHUB_WEBHOOK_SECRET` 一致。
 
 ### 3.2 权限范围 (Repository Permissions)

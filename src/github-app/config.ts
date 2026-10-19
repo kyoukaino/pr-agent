@@ -30,6 +30,8 @@ export const GitHubAppConfigSchema = z.object({
     })
     .default({}),
   model: z.string().default("deepseek-flash"),
+  /** cloudflared metrics URL of a quick tunnel; when set, the App's webhook URL follows the tunnel. */
+  tunnelMetricsUrl: z.string().url().optional(),
 });
 
 export type GitHubAppConfig = z.infer<typeof GitHubAppConfigSchema>;
@@ -54,5 +56,6 @@ export function loadGitHubAppConfig(): GitHubAppConfig {
       maxReviewsPerMinute: process.env.MAX_REVIEWS_PER_MINUTE,
     },
     model: process.env.PR_AGENT_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-flash",
+    tunnelMetricsUrl: process.env.CLOUDFLARED_METRICS_URL || undefined,
   });
 }

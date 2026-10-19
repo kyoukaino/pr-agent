@@ -1,15 +1,23 @@
+# Single-host deployment: webhook server + worker, Redis, and a Cloudflare tunnel for inbound webhooks.
+# Nothing is published on public interfaces; GitHub reaches the app only through the tunnel.
+#
+#   docker compose up -d                          # app, Redis, quick tunnel
+#   docker compose --profile observability up -d  # also Arize Phoenix (needs ~1 GB extra RAM)
+
 services:
   # ===================================================
   # 1. PR-Agent GitHub App & BullMQ Worker
   # ===================================================
   pr-agent:
+    image: ${PR_AGENT_IMAGE:-pr-agent:latest}
     build:
       context: .
       dockerfile: Dockerfile
     container_name: pr-agent-service
     restart: unless-stopped
+    # Loopback only, for health checks from the host
     ports:
-      - "${PORT:-3000}:3000"
+      - "127.0.0.1:${PORT:-3000}:3000"
     environment:
       - PORT=3000
       - NODE_ENV=production
@@ -24,21 +32,23 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       - PR_AGENT_MODEL=${PR_AGENT_MODEL:-deepseek-flash}
-      # Observability (Arize Phoenix)
+      # Observability: spans go to Phoenix only with the observability profile
+      - PR_AGENT_TELEMETRY=${PR_AGENT_TELEMETRY:-false}
       - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006/v1/traces
-      - PR_AGENT_TELEMETRY=true
       # Queue Rate Limits
-      - MAX_CONCURRENT_REVIEWS=${MAX_CONCURRENT_REVIEWS:-10}
+      - MAX_CONCURRENT_REVIEWS=${MAX_CONCURRENT_REVIEWS:-1}
       - MAX_REVIEWS_PER_MINUTE=${MAX_REVIEWS_PER_MINUTE:-30}
       - CI_WAIT_TIMEOUT_MS=${CI_WAIT_TIMEOUT_MS:-900000}
       - CI_POLL_INTERVAL_MS=${CI_POLL_INTERVAL_MS:-60000}
+      # Quick tunnel: keep the App's webhook URL on the tunnel's current hostname.
+      # Leave empty when using a named tunnel with a fixed hostname.
+      - CLOUDFLARED_METRICS_URL=${CLOUDFLARED_METRICS_URL-http://tunnel:2000}
     depends_on:
       redis:
         condition: service_healthy
-      phoenix:
-        condition: service_started
+    mem_limit: ${PR_AGENT_MEM_LIMIT:-768m}
     volumes:
-      - pr_agent_sessions:/app/.pr-agent
+      - pr_agent_data:/app/.pr-agent
     networks:
       - pr-agent-network
 
@@ -49,9 +59,8 @@ services:
     image: redis:7-alpine
     container_name: pr-agent-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --save 60 1
-    ports:
-      - "6379:6379"
+    # BullMQ requires noeviction: an evicted key would silently lose jobs.
+    command: redis-server --appendonly yes --save 60 1 --maxmemory 64mb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
     healthcheck:
@@ -59,18 +68,39 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    mem_limit: 128m
     networks:
       - pr-agent-network
 
   # ===================================================
-  # 3. Arize Phoenix (LLM Observability & Trace Waterfall)
+  # 3. Cloudflare Tunnel (inbound webhooks)
   # ===================================================
+  # Default: a quick tunnel on a random *.trycloudflare.com hostname, followed by pr-agent via the
+  # metrics server. For a fixed hostname, set CLOUDFLARE_TUNNEL_TOKEN, route the hostname to
+  # http://pr-agent:3000 in the Cloudflare dashboard, set CLOUDFLARED_METRICS_URL= (empty) and
+  # replace the command with: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+  tunnel:
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:-latest}
+    container_name: pr-agent-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 --url http://pr-agent:3000
+    depends_on:
+      - pr-agent
+    mem_limit: 128m
+    networks:
+      - pr-agent-network
+
+  # ===================================================
+  # 4. Arize Phoenix (optional: LLM Observability & Trace Waterfall)
+  # ===================================================
+  # Set PR_AGENT_TELEMETRY=true when enabling this profile.
   phoenix:
     image: arize/phoenix:latest
     container_name: pr-agent-phoenix
     restart: unless-stopped
+    profiles: ["observability"]
     ports:
-      - "6006:6006"
+      - "127.0.0.1:6006:6006"
     volumes:
       - phoenix_data:/data
     networks:
@@ -78,7 +108,7 @@ services:
 
 volumes:
   redis_data:
-  pr_agent_sessions:
+  pr_agent_data:
   phoenix_data:
 
 networks:
