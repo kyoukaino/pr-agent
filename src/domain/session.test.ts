@@ -132,3 +132,36 @@ describe("PRSessionStore", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("answering an author's reply", () => {
+  it("records the answer only when a reply is being answered", async () => {
+    const requests: ChatMessage[][] = [];
+    const turns = [
+      [
+        call("reply_to_author", { message: "You're right, it is guarded." }, "r1"),
+        call("resolve_finding", { id: "fabc123", reason: "guarded by caller" }, "r2"),
+        call("task_done", { state: "DONE" }, "r3"),
+      ],
+    ];
+    const answering = new AgentRuntimeEngine({
+      runId: "reply-test",
+      repoDir: os.tmpdir(),
+      llmClient: scriptedClient(turns, requests),
+      openFindingIds: ["fabc123"],
+      answeringReply: true,
+    });
+    const res = await answering.executeSubtask("g", [{ role: "user", content: "reply" }]);
+    expect(res.replies).toEqual(["You're right, it is guarded."]);
+    expect(res.resolved.map((r) => r.id)).toEqual(["fabc123"]);
+
+    const reviewing = new AgentRuntimeEngine({
+      runId: "review-test",
+      repoDir: os.tmpdir(),
+      llmClient: scriptedClient(turns, []),
+      openFindingIds: ["fabc123"],
+    });
+    const review = await reviewing.executeSubtask("g", [{ role: "user", content: "review" }]);
+    expect(review.replies).toEqual([]);
+    expect(review.messages.some((m) => m.content.includes("no author reply to answer"))).toBe(true);
+  });
+});

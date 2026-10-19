@@ -29,6 +29,8 @@ export interface AgentRuntimeOptions {
   onCommentEmitted?: (comment: EmittedComment) => void;
   /** Ids of findings posted by earlier reviews that resolve_finding may close. */
   openFindingIds?: string[];
+  /** Answering an author's reply in a finding thread: enables reply_to_author. */
+  answeringReply?: boolean;
 }
 
 export interface ResolvedFinding {
@@ -44,12 +46,19 @@ export interface SubtaskResult {
   comments: EmittedComment[];
   /** Earlier findings the agent verified as fixed. */
   resolved: ResolvedFinding[];
+  /** Answers to the author's reply (when answeringReply). */
+  replies: string[];
   /** The conversation as it ended; a later follow-up continues from it. */
   messages: ChatMessage[];
   error?: string;
 }
 
-const GRACE_ROUND_TOOLS = new Set(["code_comment", "resolve_finding", "task_done"]);
+const GRACE_ROUND_TOOLS = new Set([
+  "code_comment",
+  "resolve_finding",
+  "reply_to_author",
+  "task_done",
+]);
 
 export class AgentRuntimeEngine {
   public readonly runId: string;
@@ -65,6 +74,7 @@ export class AgentRuntimeEngine {
   private mounts?: Record<string, string>;
   private maxRounds: number;
   private openFindingIds: Set<string>;
+  private answeringReply: boolean;
   private resolvedIds = new Set<string>();
   private accumulatedComments: EmittedComment[] = [];
   private onCommentCallback?: (comment: EmittedComment) => void;
@@ -82,6 +92,7 @@ export class AgentRuntimeEngine {
     this.mounts = options.mounts;
     this.maxRounds = options.maxRounds ?? 100;
     this.openFindingIds = new Set(options.openFindingIds ?? []);
+    this.answeringReply = options.answeringReply ?? false;
     this.onCommentCallback = options.onCommentEmitted;
 
     if (options.signal) {
@@ -175,6 +186,7 @@ export class AgentRuntimeEngine {
 
       const subtaskComments: EmittedComment[] = [];
       const subtaskResolved: ResolvedFinding[] = [];
+      const subtaskReplies: string[] = [];
 
       const toolDispatcher = new ToolDispatcher({
         repoDir: this.repoDir,
@@ -199,6 +211,7 @@ export class AgentRuntimeEngine {
             ...resolved,
           });
         },
+        onAuthorReply: this.answeringReply ? (m) => subtaskReplies.push(m) : undefined,
       });
 
       try {
@@ -366,6 +379,7 @@ export class AgentRuntimeEngine {
         costUsd: this.budget.costUsd - costAtStart,
         comments: subtaskComments,
         resolved: subtaskResolved,
+        replies: subtaskReplies,
         messages,
         error,
       };
@@ -384,7 +398,7 @@ export class AgentRuntimeEngine {
     messages.push({
       role: "user",
       content:
-        "Your review budget is exhausted. This is your FINAL grace round. You may ONLY call 'code_comment' to report findings, 'resolve_finding' for verified fixes, or 'task_done' if finished. No other tools are available.",
+        "Your review budget is exhausted. This is your FINAL grace round. You may ONLY call 'code_comment' to report findings, 'resolve_finding' for verified fixes, 'reply_to_author' if you were asked to answer a reply, or 'task_done' if finished. No other tools are available.",
     });
 
     try {
@@ -411,8 +425,7 @@ export class AgentRuntimeEngine {
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content:
-              "Skipped: only code_comment, resolve_finding and task_done run in the grace round.",
+            content: `Skipped: only ${[...GRACE_ROUND_TOOLS].join(", ")} run in the grace round.`,
           });
           continue;
         }

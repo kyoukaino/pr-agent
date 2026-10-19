@@ -51,7 +51,7 @@ const server = http.createServer(async (req, res) => {
       public: false,
       redirect_url: `${base}/callback`,
       hook_attributes: { url: args["webhook-url"], active: true },
-      default_events: ["pull_request"],
+      default_events: ["pull_request", "pull_request_review_comment"],
       default_permissions: {
         pull_requests: "write",
         contents: "read",

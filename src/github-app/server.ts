@@ -2,7 +2,7 @@ import * as http from "node:http";
 import * as crypto from "node:crypto";
 import pc from "picocolors";
 import type { GitHubAppConfig } from "./config.js";
-import type { PRReviewQueueManager } from "./queue.js";
+import type { PRReviewJobData, PRReviewQueueManager } from "./queue.js";
 import type { PRSessionStore } from "./session-store.js";
 
 // GitHub caps webhook payloads at 25 MB.
@@ -20,6 +20,46 @@ export function verifyWebhookSignature(
   );
   const received = Buffer.from(signature);
   return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+
+/** Participants whose replies the agent answers; others could spend the LLM budget on any public PR. */
+const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * A job answering a human's reply in a review thread, or undefined for comments to ignore: new
+ * threads, bot comments (the App's own replies included) and people outside the PR. Whether the
+ * thread is one of this App's findings is checked by the worker.
+ */
+export function replyJobFor(
+  payload: Record<string, any>,
+  model: string,
+): PRReviewJobData | undefined {
+  const comment = payload.comment;
+  const pr = payload.pull_request;
+  if (payload.action !== "created" || !comment?.in_reply_to_id || !pr) return undefined;
+  if (comment.user?.type === "Bot") return undefined;
+  const trusted =
+    TRUSTED_ASSOCIATIONS.has(comment.author_association) || comment.user?.login === pr.user?.login;
+  if (!trusted || !payload.installation?.id) return undefined;
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
+  return {
+    jobId: `reply_${owner}_${repo}_pr${pr.number}_${comment.id}`,
+    owner,
+    repo,
+    pull_number: pr.number,
+    commit_id: pr.head.sha,
+    installationId: payload.installation.id,
+    model,
+    createdAt: Date.now(),
+    ciDeadline: 0,
+    reply: {
+      commentId: comment.id,
+      rootCommentId: comment.in_reply_to_id,
+      author: comment.user.login,
+      body: String(comment.body ?? ""),
+    },
+  };
 }
 
 export function createWebhookServer(
@@ -84,7 +124,7 @@ export function createWebhookServer(
       }
 
       const eventName = req.headers["x-github-event"] as string;
-      if (eventName !== "pull_request") {
+      if (eventName !== "pull_request" && eventName !== "pull_request_review_comment") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ message: `Ignored event: ${eventName}` }));
         return;
@@ -96,6 +136,21 @@ export function createWebhookServer(
       } catch {
         res.writeHead(400, { "Content-Type": "text/plain" });
         res.end("Malformed JSON");
+        return;
+      }
+
+      if (eventName === "pull_request_review_comment") {
+        const job = replyJobFor(payload, config.model);
+        if (job) {
+          await queueManager.addReviewJob(job);
+          console.log(pc.green(`[Server] Enqueued reply job: ${job.jobId}`));
+        }
+        res.writeHead(job ? 202 : 200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(
+            job ? { status: "accepted", jobId: job.jobId } : { message: "Ignored comment" },
+          ),
+        );
         return;
       }
 
