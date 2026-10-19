@@ -39,9 +39,9 @@ const newAppUrl = args.org
   ? `https://github.com/organizations/${encodeURIComponent(args.org)}/settings/apps/new`
   : "https://github.com/settings/apps/new";
 
+let base = ""; // set once listening; requests can still arrive after close (e.g. favicon)
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   if (url.pathname === "/") {
     const manifest = {
@@ -123,6 +123,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(0, "127.0.0.1", () => {
-  const port = (server.address() as AddressInfo).port;
-  console.log(`Open http://127.0.0.1:${port}/ in your browser to create the App.`);
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  console.log(`Open ${base}/ in your browser to create the App.`);
 });
