@@ -30,6 +30,8 @@ services:
       # Queue Rate Limits
       - MAX_CONCURRENT_REVIEWS=${MAX_CONCURRENT_REVIEWS:-10}
       - MAX_REVIEWS_PER_MINUTE=${MAX_REVIEWS_PER_MINUTE:-30}
+      - CI_WAIT_TIMEOUT_MS=${CI_WAIT_TIMEOUT_MS:-900000}
+      - CI_POLL_INTERVAL_MS=${CI_POLL_INTERVAL_MS:-60000}
     depends_on:
       redis:
         condition: service_healthy

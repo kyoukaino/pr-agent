@@ -1,4 +1,5 @@
-import { UnrecoverableError, Worker, type Job } from "bullmq";
+import { DelayedError, UnrecoverableError, Worker, type Job } from "bullmq";
+import * as os from "node:os";
 import { Redis } from "ioredis";
 import pc from "picocolors";
 import { PRAgent } from "../index.js";
@@ -8,6 +9,7 @@ import type { GitHubAppConfig } from "./config.js";
 import type { PRReviewJobData, PRReviewQueueManager } from "./queue.js";
 import type { GitHubAppAuthManager } from "./auth.js";
 import { checkoutPullRequest } from "./checkout.js";
+import { collectCiContext, fetchCiSnapshot, shouldWaitForCi } from "./ci.js";
 
 export class PRReviewWorker {
   private worker: Worker<PRReviewJobData>;
@@ -53,8 +55,8 @@ export class PRReviewWorker {
     // 2. Initialize BullMQ Worker (rate limiting is a worker option in BullMQ)
     this.worker = new Worker<PRReviewJobData>(
       "pr-agent-reviews",
-      async (job: Job<PRReviewJobData>) => {
-        return this.processJob(job);
+      async (job: Job<PRReviewJobData>, token?: string) => {
+        return this.processJob(job, token);
       },
       {
         connection: queueManager.redis,
@@ -72,7 +74,7 @@ export class PRReviewWorker {
     });
   }
 
-  private async processJob(job: Job<PRReviewJobData>): Promise<void> {
+  private async processJob(job: Job<PRReviewJobData>, bullToken?: string): Promise<void> {
     const data = job.data;
     const isCurrent = async () =>
       (await this.queueManager.getActiveJob(data.owner, data.repo, data.pull_number)) ===
@@ -85,15 +87,10 @@ export class PRReviewWorker {
       return;
     }
 
-    console.log(
-      pc.cyan(
-        `\n[Worker] Processing PR Review for ${data.owner}/${data.repo}#${data.pull_number} (Commit: ${data.commit_id.slice(0, 7)})...`,
-      ),
-    );
-
     const cancellationTree = new TaskCancellationTree();
     this.activeTasks.set(data.jobId, cancellationTree);
     let cleanup: (() => Promise<void>) | undefined;
+    let ciCleanup: (() => void) | undefined;
     // The active marker is cleared only when no retry will follow; a retry must still see itself as current.
     let finished = false;
 
@@ -101,7 +98,31 @@ export class PRReviewWorker {
       // 1. Authenticate with GitHub App Installation Token
       const { octokit, token } = await this.authManager.getInstallationClient(data.installationId);
 
-      // 2. Fetch raw diff from GitHub API if not pre-cached
+      // 2. Wait for the head commit's CI: re-check every poll interval until nothing is running or
+      // the deadline passes. Delaying the job does not count as an attempt.
+      const ciSnapshot = await fetchCiSnapshot(octokit, data.owner, data.repo, data.commit_id);
+      if (shouldWaitForCi(ciSnapshot, Date.now(), data.ciDeadline)) {
+        await job.moveToDelayed(Date.now() + this.config.ciWait.pollIntervalMs, bullToken);
+        throw new DelayedError();
+      }
+
+      console.log(
+        pc.cyan(
+          `\n[Worker] Processing PR Review for ${data.owner}/${data.repo}#${data.pull_number} (Commit: ${data.commit_id.slice(0, 7)})...`,
+        ),
+      );
+
+      // 3. PR description and CI results give the agent the author's intent and objective evidence.
+      const { data: pull } = await octokit.rest.pulls.get({
+        owner: data.owner,
+        repo: data.repo,
+        pull_number: data.pull_number,
+      });
+      const background = `PR title: ${pull.title}\n\n${(pull.body ?? "").slice(0, 4000)}`.trim();
+      const ci = await collectCiContext(octokit, data.owner, data.repo, ciSnapshot, os.tmpdir());
+      ciCleanup = ci.cleanup;
+
+      // 4. Fetch raw diff from GitHub API if not pre-cached
       let rawDiff = data.rawDiff;
       if (!rawDiff) {
         const diffResponse = await octokit.rest.pulls.get({
@@ -119,7 +140,7 @@ export class PRReviewWorker {
         return;
       }
 
-      // 3. Check out the PR head so context tools read the code under review.
+      // 5. Check out the PR head so context tools read the code under review.
       const checkout = await checkoutPullRequest({
         owner: data.owner,
         repo: data.repo,
@@ -130,13 +151,13 @@ export class PRReviewWorker {
       });
       cleanup = checkout.cleanup;
 
-      // 4. Instantiate PR-Agent with the project configuration (rules, budget, policy)
+      // 6. Instantiate PR-Agent with the project configuration (rules, budget, policy)
       const { config } = await loadConfig({
         overrides: { model: data.model || this.config.model },
       });
       const agent = new PRAgent(config);
 
-      // 5. Run autonomous review; a cancel broadcast aborts it mid-flight
+      // 7. Run autonomous review; a cancel broadcast aborts it mid-flight
       const reviewPayload = await agent.reviewPR({
         owner: data.owner,
         repo: data.repo,
@@ -144,6 +165,9 @@ export class PRReviewWorker {
         commit_id: data.commit_id,
         rawDiff,
         repoDir: checkout.dir,
+        background,
+        ciResults: ci.summary || undefined,
+        ciLogsDir: ci.logsDir,
         signal: cancellationTree.signal,
       });
 
@@ -155,7 +179,7 @@ export class PRReviewWorker {
         return;
       }
 
-      // 6. Post review payload directly to GitHub
+      // 8. Post review payload directly to GitHub
       console.log(
         pc.green(
           `[Worker] Posting review to GitHub (${reviewPayload.event}, ${reviewPayload.comments.length} comments)...`,
@@ -164,6 +188,8 @@ export class PRReviewWorker {
       await octokit.rest.pulls.createReview(reviewPayload);
       finished = true;
     } catch (err) {
+      // Waiting for CI: the job comes back later and must still own the active marker.
+      if (err instanceof DelayedError) throw err;
       finished = cancellationTree.isAborted || job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
       // A superseded job must not be retried by BullMQ.
       if (cancellationTree.isAborted) {
@@ -175,6 +201,7 @@ export class PRReviewWorker {
     } finally {
       this.activeTasks.delete(data.jobId);
       await cleanup?.().catch(() => undefined);
+      ciCleanup?.();
       if (finished) {
         await this.queueManager
           .clearActiveJob(data.owner, data.repo, data.pull_number, data.jobId)

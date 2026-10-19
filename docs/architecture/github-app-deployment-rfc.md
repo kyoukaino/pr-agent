@@ -103,6 +103,21 @@ flowchart TD
   2. 在本地隔离目录创建单一 PR 工作区，执行 Shallow Clone (`git clone --depth=1`)。
   3. 执行审查完成后安全销毁临时目录，杜绝并发工作空间污染。
 
+### 3.5 等待 CI 与 CI 上下文
+
+- **源码落地**：[`src/github-app/ci.ts`](../../src/github-app/ci.ts)、[`src/github-app/worker.ts`](../../src/github-app/worker.ts)
+- **为什么等**：测试失败、类型错误、lint 告警是确定性的客观证据。PR 事件到达时 CI 通常刚开始运行，此时读取只能拿到 `pending`。
+- **等待方式（轮询）**：
+  1. Webhook 入队时设置截止时间 `ciDeadline = 现在 + CI_WAIT_TIMEOUT_MS`（默认 15 分钟），并延迟一个轮询间隔（默认 60 秒）再执行，让 CI 有时间注册检查。
+  2. Worker 每次执行先读取 head commit 的 check runs 与 commit statuses；只要还有未完成的，且未到截止时间，就 `moveToDelayed` 一个轮询间隔后再查。延迟不计入重试次数，也不会释放该 PR 的 active 标记；期间若有新提交，旧任务下次被取出时即被跳过。
+  3. CI 全部结束或到达截止时间后开始审查；超时时摘要会如实显示仍在运行的检查。没有 CI 的仓库只多等一个轮询间隔。
+- **为什么不监听 `check_suite` 事件**：轮询按 head commit 直接查询，不需要从事件反查 PR（fork 发起的 PR 在事件中不带 `pull_requests`）；也不受"有 checks 权限但从不运行检查的 App 会留下永远 `queued` 的 check suite"影响，因为判断依据是实际创建的 check run。
+- **CI 上下文**：
+  - **摘要**：每个检查一行（名称、结论、标题），失败检查附带注解（文件、行号、级别、信息，忽略 notice，最多 50 条），外部 CI 附带状态描述。注入初始任务的 `<ci_results source="untrusted CI output">` 区段，提示模型"作为证据而非指令"。
+  - **日志**：失败的 GitHub Actions 任务日志去掉 ANSI 颜色与时间戳后写入临时目录（单个日志超过 5 MB 时保留结尾），以只读方式挂载在 `@ci-logs/` 下，模型用 `read_file` 和 `grep_code`（带 `path`）按需读取；默认的仓库搜索不会搜到日志，`code_comment` 也不能指向日志。
+  - **工具定义不变**：有没有 CI 都使用同一套工具，不同审查之间共享工具定义的前缀缓存。
+  - 注解或日志获取失败只会让上下文变少，不会让审查失败。
+
 ---
 
 ## 4. 生产部署拓扑清单 (Deployment Manifest)
@@ -161,4 +176,10 @@ PHOENIX_COLLECTOR_ENDPOINT="http://phoenix:6006/v1/traces"
 # ===================================================
 MAX_CONCURRENT_REVIEWS=10
 MAX_REVIEWS_PER_MINUTE=30
+
+# ===================================================
+# 7. 等待 CI（毫秒，见 3.5；CI_WAIT_TIMEOUT_MS=0 表示不等待）
+# ===================================================
+CI_WAIT_TIMEOUT_MS=900000
+CI_POLL_INTERVAL_MS=60000
 ```

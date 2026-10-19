@@ -130,16 +130,24 @@ export function createWebhookServer(
       }
 
       // Push review job into BullMQ
-      await queueManager.addReviewJob({
-        jobId,
-        owner,
-        repo,
-        pull_number: pullNumber,
-        commit_id: commitId,
-        installationId,
-        model: config.model,
-        createdAt: Date.now(),
-      });
+      // Reviews wait for CI (see worker). The first check is delayed one poll interval so the
+      // commit's CI has time to register its checks; with waiting disabled the job runs at once.
+      const now = Date.now();
+      const waitForCi = config.ciWait.timeoutMs > 0;
+      await queueManager.addReviewJob(
+        {
+          jobId,
+          owner,
+          repo,
+          pull_number: pullNumber,
+          commit_id: commitId,
+          installationId,
+          model: config.model,
+          createdAt: now,
+          ciDeadline: now + config.ciWait.timeoutMs,
+        },
+        waitForCi ? config.ciWait.pollIntervalMs : 0,
+      );
 
       console.log(
         pc.green(

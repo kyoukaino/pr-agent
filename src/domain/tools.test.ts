@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
-import { ToolDispatcher, TOOL_OUTPUT_LIMITS } from "./tools.js";
+import { CI_LOGS_MOUNT, ToolDispatcher, TOOL_OUTPUT_LIMITS } from "./tools.js";
 import type { EmittedComment } from "./github-types.js";
 
 describe("ToolDispatcher", () => {
@@ -106,5 +106,81 @@ describe("ToolDispatcher", () => {
     const failed = await tools.execute("task_done", JSON.stringify({ state: "FAILED" }));
     expect(failed).toMatchObject({ done: true, completed: false });
     expect(failed.failed).toBeUndefined();
+  });
+});
+
+describe("ToolDispatcher mounts (CI logs)", () => {
+  let root: string;
+  let tools: ToolDispatcher;
+  const emitted: EmittedComment[] = [];
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "pr-agent-mount-"));
+    fs.mkdirSync(path.join(root, "repo", "src"), { recursive: true });
+    fs.mkdirSync(path.join(root, "logs"));
+    fs.writeFileSync(path.join(root, "repo", "src", "app.ts"), "export const ok = 1;\n");
+    fs.writeFileSync(
+      path.join(root, "logs", "build-1.log"),
+      "Run tsc\nsrc/app.ts(1,14): error TS2304: Cannot find name 'missing'.\nDone\n",
+    );
+    fs.writeFileSync(path.join(root, "outside.txt"), "secret\n");
+    tools = new ToolDispatcher({
+      repoDir: path.join(root, "repo"),
+      changedPaths: ["src/app.ts"],
+      mounts: { [CI_LOGS_MOUNT]: path.join(root, "logs") },
+      onCommentEmitted: (c) => emitted.push(c),
+    });
+  });
+
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it("reads a mounted log under its prefix", async () => {
+    const res = await tools.execute(
+      "read_file",
+      JSON.stringify({ path: `${CI_LOGS_MOUNT}/build-1.log` }),
+    );
+    expect(res.failed).toBeUndefined();
+    expect(res.result).toContain(`--- ${CI_LOGS_MOUNT}/build-1.log`);
+    expect(res.result).toContain("error TS2304");
+  });
+
+  it("greps a mount only when asked, reporting paths with the prefix", async () => {
+    const scoped = await tools.execute(
+      "grep_code",
+      JSON.stringify({ pattern: "TS2304", path: CI_LOGS_MOUNT }),
+    );
+    expect(scoped.result).toContain(`${CI_LOGS_MOUNT}/build-1.log:2:`);
+
+    const repoWide = await tools.execute("grep_code", JSON.stringify({ pattern: "TS2304" }));
+    expect(repoWide.result).toContain("No matches"); // logs never add noise to code searches
+  });
+
+  it("scopes a repository search to a path", async () => {
+    const res = await tools.execute(
+      "grep_code",
+      JSON.stringify({ pattern: "ok", path: "src/app.ts" }),
+    );
+    expect(res.result).toContain("src/app.ts:1:");
+  });
+
+  it("refuses traversal out of a mount and comments on logs", async () => {
+    const escape = await tools.execute(
+      "read_file",
+      JSON.stringify({ path: `${CI_LOGS_MOUNT}/../outside.txt` }),
+    );
+    expect(escape.failed).toBe(true);
+    const comment = await tools.execute(
+      "code_comment",
+      JSON.stringify({
+        path: `${CI_LOGS_MOUNT}/build-1.log`,
+        line: 2,
+        severity: "P1",
+        category: "bug",
+        title: "t",
+        body: "b",
+      }),
+    );
+    expect(comment.failed).toBe(true);
+    expect(emitted).toHaveLength(0);
   });
 });

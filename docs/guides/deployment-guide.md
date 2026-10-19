@@ -50,6 +50,10 @@ PR_AGENT_MODEL="deepseek-flash"
 # 并发与限流
 MAX_CONCURRENT_REVIEWS=10
 MAX_REVIEWS_PER_MINUTE=30
+
+# 等待 CI：最长等待时间与轮询间隔（毫秒）；CI_WAIT_TIMEOUT_MS=0 表示不等待
+CI_WAIT_TIMEOUT_MS=900000
+CI_POLL_INTERVAL_MS=60000
 ```
 
 ### 2.2 启动容器编排
@@ -93,12 +97,19 @@ docker compose ps
 | **Pull Requests**   | **Read & Write**  | 读取 PR 变更信息并在 PR 下批量提交行级内联评论与审查结论    |
 | **Contents**        | **Read-only**     | 在隔离临时区浅克隆代码，以便执行 `read_file` 和 `grep_code` |
 | **Metadata**        | **Read-only**     | (默认要求) 检索基础仓库元数据                               |
+| **Checks**          | **Read-only**     | 读取 head commit 的检查结果与失败注解，作为审查的 CI 上下文 |
+| **Commit statuses** | **Read-only**     | 读取 Jenkins 等外部 CI 写入的提交状态                       |
+| **Actions**         | **Read-only**     | 下载失败的 GitHub Actions 任务日志，供 Agent 按需读取       |
+
+缺少后三项权限时审查照常进行，只是没有对应的 CI 上下文。
 
 ### 3.3 订阅事件 (Subscribe to Events)
 
 勾选以下 Webhook 事件监听：
 
 - `[x] Pull request`：监听 PR 创建（`opened`）与推送新 Commit（`synchronize`）。
+
+等待 CI 采用轮询，不需要订阅 `check_suite` 等额外事件（见 [RFC 3.5](../architecture/github-app-deployment-rfc.md#35-等待-ci-与-ci-上下文)）。
 
 ### 3.4 生成私钥并安装到仓库
 

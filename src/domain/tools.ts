@@ -68,7 +68,7 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
     function: {
       name: "read_file",
       description:
-        "Reads lines of a file in the repository (head revision) to inspect definitions, callers, or context. Returns at most 400 lines per call; pass start_line/end_line for large files.",
+        "Reads lines of a file in the repository (head revision) to inspect definitions, callers, or context, or of a CI log listed in <ci_results>. Returns at most 400 lines per call; pass start_line/end_line for large files.",
       parameters: {
         type: "object",
         required: ["path"],
@@ -107,6 +107,11 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
             type: "string",
             description: "Optional file extension filter, e.g. '.ts', '.go', '.py'.",
           },
+          path: {
+            type: "string",
+            description:
+              "Optional directory or file to search instead of the whole repository, e.g. 'src/auth' or a CI log listed in <ci_results>.",
+          },
         },
       },
     },
@@ -129,6 +134,9 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
     },
   },
 ];
+
+/** Path prefix under which failed CI job logs are mounted read-only for read_file / grep_code. */
+export const CI_LOGS_MOUNT = "@ci-logs";
 
 /** Output limits that keep a single tool result from flooding the context window. */
 export const TOOL_OUTPUT_LIMITS = {
@@ -170,6 +178,21 @@ export interface ToolExecutionContext {
   changedPaths?: string[];
   onCommentEmitted: (comment: EmittedComment) => void;
   signal?: AbortSignal;
+  /**
+   * Read-only directories exposed under a path prefix, e.g. { "@ci-logs": "/tmp/pr-agent-ci-x" }.
+   * read_file and grep_code (with an explicit path) reach them; the default repository-wide search
+   * does not, so they never add noise to code searches.
+   */
+  mounts?: Record<string, string>;
+}
+
+interface ResolvedPath {
+  abs: string;
+  /** Path as shown to the model: repository-relative, or `<mount>/<relative>`. */
+  rel: string;
+  /** Repository root or mount directory the path lives under. */
+  root: string;
+  mount?: string;
 }
 
 export interface ToolExecutionResult {
@@ -199,11 +222,15 @@ export class ToolDispatcher {
   private ctx: ToolExecutionContext;
   private repoRoot: string;
   private changedPaths?: Set<string>;
+  private mounts: Map<string, string>;
 
   constructor(ctx: ToolExecutionContext) {
     this.ctx = ctx;
     this.repoRoot = fs.realpathSync(path.resolve(ctx.repoDir));
     this.changedPaths = ctx.changedPaths ? new Set(ctx.changedPaths) : undefined;
+    this.mounts = new Map(
+      Object.entries(ctx.mounts ?? {}).map(([name, dir]) => [name, fs.realpathSync(dir)]),
+    );
   }
 
   public async execute(name: string, argsJson: string): Promise<ToolExecutionResult> {
@@ -250,11 +277,22 @@ export class ToolDispatcher {
   }
 
   /** Resolves a model-supplied path inside the repository, rejecting traversal and symlink escapes. */
-  private resolveInRepo(p: unknown): { abs: string; rel: string } {
+  /**
+   * Resolves a model-supplied path inside the repository or a mount, rejecting traversal and
+   * symlink escapes from whichever root it belongs to.
+   */
+  private resolvePath(p: unknown): ResolvedPath {
     if (typeof p !== "string" || !p.trim()) throw new ToolInputError("'path' is required");
-    const abs = path.resolve(this.repoRoot, p);
+    const normalized = p.replace(/\\/g, "/");
+    const mount = [...this.mounts.keys()].find(
+      (m) => normalized === m || normalized.startsWith(`${m}/`),
+    );
+    const root = mount ? this.mounts.get(mount)! : this.repoRoot;
+    const inner = mount ? normalized.slice(mount.length + 1) || "." : p;
+
+    const abs = path.resolve(root, inner);
     const escapes = (target: string) => {
-      const rel = path.relative(this.repoRoot, target);
+      const rel = path.relative(root, target);
       return rel.startsWith("..") || path.isAbsolute(rel);
     };
     if (escapes(abs)) throw new ToolInputError(`path '${p}' is outside the repository`);
@@ -262,7 +300,9 @@ export class ToolDispatcher {
     if (escapes(fs.realpathSync(abs))) {
       throw new ToolInputError(`path '${p}' is outside the repository`);
     }
-    return { abs, rel: path.relative(this.repoRoot, abs).replace(/\\/g, "/") };
+    const relInRoot = path.relative(root, abs).replace(/\\/g, "/");
+    const rel = mount ? (relInRoot ? `${mount}/${relInRoot}` : mount) : relInRoot;
+    return { abs, rel, root, mount };
   }
 
   private codeComment(args: Record<string, unknown>): string {
@@ -303,7 +343,7 @@ export class ToolDispatcher {
   }
 
   private readFile(args: Record<string, unknown>): string {
-    const { abs, rel } = this.resolveInRepo(args.path);
+    const { abs, rel } = this.resolvePath(args.path);
     if (!fs.statSync(abs).isFile()) throw new ToolInputError(`'${rel}' is not a file`);
     const buf = fs.readFileSync(abs);
     if (buf.subarray(0, 8000).includes(0)) throw new ToolInputError(`'${rel}' is a binary file`);
@@ -349,17 +389,24 @@ export class ToolDispatcher {
         : `.${args.file_extension}`;
       rgArgs.push("--glob", `*${ext}`);
     }
-    // An explicit path is required: with no path and a piped stdin, rg searches stdin instead.
-    rgArgs.push("--regexp", pattern, "--", ".");
+    // Scope: the whole repository by default, or an explicit directory / file, possibly in a mount.
+    const scope =
+      typeof args.path === "string" && args.path.trim() ? this.resolvePath(args.path) : null;
+    const cwd = scope?.root ?? this.repoRoot;
+    const target = scope ? path.relative(scope.root, scope.abs).replace(/\\/g, "/") || "." : ".";
+    const shownPrefix = scope?.mount ? `${scope.mount}/` : "";
+    // An explicit target is required: with no path and a piped stdin, rg searches stdin instead.
+    // --with-filename keeps the path in the output even when the target is a single file.
+    rgArgs.push("--with-filename", "--regexp", pattern, "--", target);
 
     const { lines, truncated } = await new Promise<{ lines: string[]; truncated: boolean }>(
       (resolve, reject) => {
         const child = spawn(rgPath, rgArgs, {
-          cwd: this.repoRoot,
+          cwd,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
         });
-        const clean = (line: string) => line.replace(/\r$/, "").replace(/^\.\//, "");
+        const clean = (line: string) => shownPrefix + line.replace(/\r$/, "").replace(/^\.\//, "");
         const out: string[] = [];
         let pending = "";
         let stderr = "";

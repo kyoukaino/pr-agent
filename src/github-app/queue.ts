@@ -12,6 +12,8 @@ export interface PRReviewJobData {
   rawDiff?: string;
   model: string;
   createdAt: number;
+  /** Until when (epoch ms) the review waits for the head commit's CI to finish. */
+  ciDeadline: number;
 }
 
 const ACTIVE_JOB_TTL_SECONDS = 6 * 60 * 60;
@@ -50,9 +52,10 @@ export class PRReviewQueueManager {
   /**
    * Pushes a review job into the BullMQ queue.
    */
-  public async addReviewJob(data: PRReviewJobData): Promise<void> {
+  public async addReviewJob(data: PRReviewJobData, delayMs = 0): Promise<void> {
     await this.queue.add("review_pr", data, {
       jobId: data.jobId,
+      delay: delayMs,
       priority: data.model.includes("flash") ? 1 : 2, // flash gets higher priority
     });
   }

@@ -12,6 +12,17 @@ export const GitHubAppConfigSchema = z.object({
       password: z.string().optional(),
     })
     .default({}),
+  ciWait: z
+    .object({
+      /** How long a review waits for the head commit's CI to finish; 0 reviews immediately. */
+      timeoutMs: z.coerce
+        .number()
+        .min(0)
+        .default(15 * 60_000),
+      /** How often CI is re-checked while waiting; also the delay before the first check. */
+      pollIntervalMs: z.coerce.number().positive().default(60_000),
+    })
+    .default({}),
   rateLimit: z
     .object({
       maxConcurrentReviews: z.coerce.number().default(10),
@@ -33,6 +44,10 @@ export function loadGitHubAppConfig(): GitHubAppConfig {
       host: process.env.REDIS_HOST,
       port: process.env.REDIS_PORT,
       password: process.env.REDIS_PASSWORD,
+    },
+    ciWait: {
+      timeoutMs: process.env.CI_WAIT_TIMEOUT_MS,
+      pollIntervalMs: process.env.CI_POLL_INTERVAL_MS,
     },
     rateLimit: {
       maxConcurrentReviews: process.env.MAX_CONCURRENT_REVIEWS,
