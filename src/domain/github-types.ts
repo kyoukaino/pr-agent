@@ -14,7 +14,13 @@ export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 export type DefectSeverity = "P0" | "P1" | "P2" | "P3" | "P4";
 
-export type DefectCategory = "security" | "bug" | "performance" | "maintainability" | "logic";
+export type DefectCategory =
+  | "security"
+  | "bug"
+  | "performance"
+  | "maintainability"
+  | "logic"
+  | "documentation";
 
 /**
  * Normalized internal representation of an emitted review finding.
