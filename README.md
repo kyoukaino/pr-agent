@@ -40,11 +40,11 @@ PR-Agent 使用自研的轻量 Agent Runtime 驱动 ReAct 式审查循环，支�
 
 ```bash
 vp install
-vp pack        # 产出 dist/cli.mjs、dist/index.mjs 及类型声明
-vp link        # 将 pr-agent 命令注册到全局
+vp pack           # 产出 dist/cli.mjs、dist/index.mjs 及类型声明
+vp install -g .   # 全局安装 pr-agent 命令（链接到本目录）
 ```
 
-`pr-agent` 命令执行的是 `dist/cli.mjs`，修改源码后需重新运行 `vp pack`。
+全局安装链接到当前目录，`pr-agent` 执行的是本目录的 `dist/cli.mjs`：修改源码后重新 `vp pack` 即可生效，无需重新安装。卸载用 `vp remove -g pr-agent`。
 
 ### 第一次审查
 
