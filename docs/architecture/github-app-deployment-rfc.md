@@ -118,6 +118,17 @@ flowchart TD
   - **工具定义不变**：有没有 CI 都使用同一套工具，不同审查之间共享工具定义的前缀缓存。
   - 注解或日志获取失败只会让上下文变少，不会让审查失败。
 
+### 3.6 增量重审与发现去重
+
+- **源码落地**：[`src/github-app/history.ts`](../../src/github-app/history.ts)、[`src/github-app/worker.ts`](../../src/github-app/worker.ts)
+- **问题**：每次推送都全量重审会把已经报过的问题换个说法再报一次（例如采纳一条 suggestion 后），还会重复花费审查整个 PR 的成本。
+- **审查历史**：Worker 读取该 PR 上本 App（`<slug>[bot]`）发布过的审查。最近一次审查的 `commit_id` 是上次审查到的提交；各次审查摘要 "Key Findings Overview" 中的条目（级别、位置、标题）是已发布的发现，包括没能锚定到行的发现。
+- **增量范围**：
+  - 新 head 是上次审查提交的后代（`compare` 状态为 `ahead`）时，只审查两者之间的 diff，并且只看 PR 改动过的文件（合并 base 分支带进来的其他文件不审）。整个 PR 的 diff 仍用于行号锚定，因为 GitHub 只接受落在 PR diff 上的评论。
+  - force-push 或 rebase 后旧提交不再是祖先，退回全量审查。
+  - 新提交没有改动 PR 中的任何文件，或者 head 已经审查过（重复投递、重新打开 PR）时，不审查、不发布。
+- **去重**：已发布的发现以 `<findings_from_previous_reviews>` 区段注入，要求模型不得重复（包括换说法、换行号）。它与同一次审查内各文件组之间的 `confirmedComments` 去重互相独立。
+
 ---
 
 ## 4. 生产部署拓扑清单 (Deployment Manifest)

@@ -13,6 +13,7 @@ export * from "./worker.js";
 export * from "./server.js";
 export * from "./ci.js";
 export * from "./tunnel.js";
+export * from "./history.js";
 
 /**
  * Boots the unified GitHub App server and BullMQ worker instance for private single-tenant deployment.
