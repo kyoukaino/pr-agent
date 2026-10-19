@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vite-plus/test";
 import type { Octokit } from "@octokit/rest";
-import { loadOpenFindings, resolveFindingThreads } from "./threads.js";
+import { loadOpenFindings, resolveFindingThreads, type ThreadFinding } from "./threads.js";
 import { findingMarker } from "../domain/relocator.js";
 
 const thread = (over: Record<string, unknown>, body: string, login = "pr-agent-test") => ({
@@ -16,24 +16,30 @@ const thread = (over: Record<string, unknown>, body: string, login = "pr-agent-t
 const findingBody = (title: string, id?: string) =>
   `**[P4]** [DOCUMENTATION] **${title}**\n\nCause...${id ? `\n\n${findingMarker(id)}` : ""}`;
 
+const threadsResponse = (nodes: unknown[]) => async () => ({
+  repository: {
+    pullRequest: {
+      reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes },
+    },
+  },
+});
+
 describe("open findings from review threads", () => {
   it("keeps the App's unresolved finding threads, with their tagged or derived ids", async () => {
+    const tagged = findingBody("Comment overstates guarantee", "fq1w2e3");
+    const legacy = findingBody("Untagged legacy");
     const octokit = {
-      graphql: async () => ({
-        repository: {
-          pullRequest: {
-            reviewThreads: {
-              pageInfo: { hasNextPage: false, endCursor: null },
-              nodes: [
-                thread({}, findingBody("Comment overstates guarantee", "fq1w2e3")),
-                thread({ id: "T2", isResolved: true }, findingBody("Already resolved", "fdone00")),
-                thread({ id: "T3" }, "Looks good to me", "a-human"),
-                thread({ id: "T4", line: null, originalLine: 4 }, findingBody("Untagged legacy")),
-              ],
-            },
-          },
-        },
-      }),
+      graphql: threadsResponse([
+        thread({}, tagged),
+        thread({ id: "T2", isResolved: true }, findingBody("Already resolved", "fdone00")),
+        thread({ id: "T3" }, "Looks good to me", "a-human"),
+        thread({ id: "T4", line: null, originalLine: 4 }, legacy),
+        // Marked fixed in place earlier: no longer open although the thread is unresolved
+        thread(
+          { id: "T5" },
+          `> ✅ **Resolved in abc1234**\n\n${tagged}\n<!-- pr-agent:resolved -->`,
+        ),
+      ]),
     } as unknown as Octokit;
 
     const open = await loadOpenFindings(octokit, "o", "r", 1, "pr-agent-test[bot]");
@@ -46,6 +52,7 @@ describe("open findings from review threads", () => {
         title: "Comment overstates guarantee",
         threadId: "T1",
         commentId: 501,
+        body: tagged,
       },
       {
         id: "c501",
@@ -55,33 +62,58 @@ describe("open findings from review threads", () => {
         title: "Untagged legacy",
         threadId: "T4",
         commentId: 501,
+        body: legacy,
       },
     ]);
   });
+});
 
-  it("replies with the reason and resolves only the threads of resolved findings", async () => {
-    const replies: string[] = [];
-    const mutations: unknown[] = [];
+describe("resolveFindingThreads", () => {
+  const open: ThreadFinding[] = [
+    { id: "fa", path: "x", title: "A", threadId: "TA", commentId: 1, body: "**A**" },
+    { id: "fb", path: "y", title: "B", threadId: "TB", commentId: 2, body: "**B**" },
+  ];
+  const resolved = [
+    { id: "fb", reason: "the comment now states the real guarantee" },
+    { id: "unknown", reason: "-" },
+  ];
+
+  function fakeOctokit(canResolve: boolean) {
+    const log: string[] = [];
     const octokit = {
       rest: {
         pulls: {
           createReplyForReviewComment: async (p: { comment_id: number; body: string }) =>
-            replies.push(`${p.comment_id}: ${p.body}`),
+            log.push(`reply ${p.comment_id}: ${p.body}`),
+          updateReviewComment: async (p: { comment_id: number; body: string }) =>
+            log.push(`edit ${p.comment_id}: ${p.body}`),
         },
       },
-      graphql: async (_q: string, vars: unknown) => mutations.push(vars),
+      graphql: async (_q: string, vars: { id: string }) => {
+        if (!canResolve) throw new Error("Resource not accessible by integration");
+        log.push(`resolve ${vars.id}`);
+      },
     } as unknown as Octokit;
-    const open = [
-      { id: "fa", path: "x", title: "A", threadId: "TA", commentId: 1 },
-      { id: "fb", path: "y", title: "B", threadId: "TB", commentId: 2 },
-    ];
+    return { octokit, log };
+  }
 
-    const n = await resolveFindingThreads(octokit, "o", "r", 1, "c10201f0000", open, [
-      { id: "fb", reason: "the comment now states the real guarantee" },
-      { id: "unknown", reason: "-" },
+  it("replies with the reason and resolves only the threads of resolved findings", async () => {
+    const { octokit, log } = fakeOctokit(true);
+    expect(await resolveFindingThreads(octokit, "o", "r", 1, "c10201f0000", open, resolved)).toBe(
+      1,
+    );
+    expect(log).toEqual([
+      "reply 2: Fixed in c10201f: the comment now states the real guarantee",
+      "resolve TB",
     ]);
-    expect(n).toBe(1);
-    expect(replies).toEqual(["2: Fixed in c10201f: the comment now states the real guarantee"]);
-    expect(mutations).toEqual([{ id: "TB" }]);
+  });
+
+  it("marks the finding comment resolved when GitHub refuses to resolve the thread", async () => {
+    const { octokit, log } = fakeOctokit(false);
+    await resolveFindingThreads(octokit, "o", "r", 1, "c10201f0000", open, resolved);
+    expect(log).toEqual([
+      "reply 2: Fixed in c10201f: the comment now states the real guarantee",
+      "edit 2: > ✅ **Resolved in c10201f**\n\n**B**\n<!-- pr-agent:resolved -->",
+    ]);
   });
 });

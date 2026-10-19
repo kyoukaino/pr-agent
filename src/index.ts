@@ -369,6 +369,10 @@ export class PRAgent {
             options.maxCommentsPerReview || this.config.review.maxCommentsPerReview,
           skippedFiles,
           incompleteGroups: groups.filter((g) => g.error).map((g) => g.group),
+          stillOpen: options.openFindings?.filter(
+            (f) => !resolvedFindings.some((r) => r.id === f.id),
+          ),
+          resolvedCount: resolvedFindings.length,
         }) as PRAgentReviewPayload;
 
         // 10. Optional GitHub Publishing

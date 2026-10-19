@@ -117,3 +117,26 @@ describe("selectPostedComments", () => {
     ]);
   });
 });
+
+describe("verdict of a follow-up review", () => {
+  const relocator = new DiffAnchorRelocator(parseGitDiff(SAMPLE_DIFF));
+  const base = { owner: "o", repo: "r", pull_number: 1, commit_id: "c", comments: [], relocator };
+
+  it("is not an approval while earlier findings stay open", () => {
+    const blocked = ReviewPayloadAssembler.assemble({ ...base, stillOpen: [{ severity: "P1" }] });
+    expect(blocked.event).toBe("REQUEST_CHANGES");
+    const minor = ReviewPayloadAssembler.assemble({
+      ...base,
+      stillOpen: [{ severity: "P3" }],
+      resolvedCount: 1,
+    });
+    expect(minor.event).toBe("COMMENT");
+    expect(minor.body).toContain("Earlier findings: 1 resolved in this review, 1 still open.");
+    expect(minor.body).toContain("No new defects in these changes.");
+  });
+
+  it("approves once nothing new was found and nothing earlier is open", () => {
+    const clean = ReviewPayloadAssembler.assemble({ ...base, stillOpen: [], resolvedCount: 2 });
+    expect(clean.event).toBe("APPROVE");
+  });
+});

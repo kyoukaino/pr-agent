@@ -128,7 +128,11 @@ flowchart TD
   - 本 App 各次审查摘要 "Key Findings Overview" 中的发现，作为"不得重复"的列表；
   - 能增量时只审查自上次审查以来的 diff（只看 PR 改动过的文件），否则全量审查；
   - head 已审查过（重复投递、重新打开 PR）或新提交没有改动 PR 中的任何文件时，直接跳过。
-- **关闭已修复的发现**：发布的每条评论末尾带有隐藏标记 `<!-- pr-agent:finding=<id> -->`。审查前用 GraphQL 读取本 App 发起、仍未解决的讨论，以 `<open_findings>` 列表（带 id）交给 Agent。Agent 核实代码已修复后调用 `resolve_finding(id, reason)`；审查发布后，Worker 在该讨论下回复 "Fixed in <sha>: <reason>" 并将其标为已解决。没有标记的旧评论用 `c<评论 id>` 作为 id。
+- **关闭已修复的发现**：发布的每条评论末尾带有隐藏标记 `<!-- pr-agent:finding=<id> -->`。审查前用 GraphQL 读取本 App 发起、仍未解决的讨论，以 `<open_findings>` 列表（带 id）交给 Agent。Agent 核实代码已修复后调用 `resolve_finding(id, reason)`；审查发布后，Worker 在该讨论下回复 "Fixed in <sha>: <reason>"，再关闭这条发现：
+  - 先尝试用 `resolveReviewThread` 把讨论标为已解决。实测只有 `pull_requests: write` 的 App 调用它会返回 `Resource not accessible by integration`。
+  - 被拒绝时，改为编辑原评论：在开头加上 "✅ Resolved in <sha>"，并附上隐藏标记 `<!-- pr-agent:resolved -->`。带这个标记的评论不再列入待处理。
+  - 没有隐藏 id 标记的旧评论，用 `c<评论 id>` 作为 id。
+- **审查结论**：后续审查的结论会把仍未解决的历史发现计算在内。还有未解决的阻塞级发现时给 REQUEST_CHANGES；只剩非阻塞的发现时给 COMMENT；只有新改动没有问题、且没有任何未解决的发现时，才给 APPROVE。摘要里会注明本次关闭了多少条、还剩多少条。
 - **回复评论**：订阅 `pull_request_review_comment` 事件。当 PR 作者或仓库成员（OWNER / MEMBER / COLLABORATOR）在本 App 某条未解决发现的讨论里回复时，Worker 签出 PR 当前 head，把回复追加到审查过该文件的那段对话中（没有会话时，新开一段只针对这条讨论的对话）。
   - Agent 重新核对代码后，用 `reply_to_author` 回答一次；作者说得对时，同时调用 `resolve_finding`，讨论随之标为已解决。
   - 回复内容放在 `<author_reply source="untrusted PR participant">` 中，只当作论据，不当作指令。

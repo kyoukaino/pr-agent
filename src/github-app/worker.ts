@@ -12,7 +12,7 @@ import type { GitHubAppAuthManager } from "./auth.js";
 import { checkoutPullRequest } from "./checkout.js";
 import { collectCiContext, fetchCiSnapshot, shouldWaitForCi } from "./ci.js";
 import { fetchIncrementalDiff, loadReviewHistory } from "./history.js";
-import { loadOpenFindings, resolveFindingThreads, resolveThread } from "./threads.js";
+import { closeFinding, loadOpenFindings, resolveFindingThreads } from "./threads.js";
 import type { PRSessionStore } from "./session-store.js";
 
 const PR_LOCK_RETRY_MS = 15_000;
@@ -384,7 +384,7 @@ export class PRReviewWorker {
         commit_id: pull.head.sha,
         rawDiff: rawDiff as unknown as string,
         repoDir: checkout.dir,
-        finding: { ...finding, body: root.body },
+        finding,
         author: reply.author,
         reply: reply.body,
         session: saved?.model === config.model ? saved : undefined,
@@ -399,7 +399,9 @@ export class PRReviewWorker {
           body: result.answer,
         });
       }
-      if (result.resolved) await resolveThread(octokit, finding.threadId);
+      if (result.resolved) {
+        await closeFinding(octokit, data.owner, data.repo, finding, pull.head.sha);
+      }
       if (result.session) {
         this.sessionStore.save(data.owner, data.repo, data.pull_number, result.session);
       }

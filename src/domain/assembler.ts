@@ -22,6 +22,13 @@ export interface AssembleReviewOptions {
   skippedFiles?: { path: string; reason: string }[];
   /** File groups whose review ended early (LLM failure). */
   incompleteGroups?: string[];
+  /**
+   * Findings of earlier reviews still open after this one: they count toward the verdict, so a
+   * push without new findings is not approved while earlier blockers stand.
+   */
+  stillOpen?: { severity?: string }[];
+  /** Earlier findings this review verified as fixed. */
+  resolvedCount?: number;
 }
 
 interface UnanchoredFinding {
@@ -87,8 +94,11 @@ export class ReviewPayloadAssembler {
       P3: ["P0", "P1", "P2", "P3"],
     };
     const targets = blockSeverities[minSeverityToBlock] || ["P0", "P1"];
-    const shouldBlock = boundedComments.some((c) => targets.includes(c.severity));
-    const hasAnyComments = boundedComments.length > 0;
+    const stillOpen = options.stillOpen ?? [];
+    const shouldBlock =
+      boundedComments.some((c) => targets.includes(c.severity)) ||
+      stillOpen.some((f) => f.severity !== undefined && targets.includes(f.severity));
+    const hasAnyComments = boundedComments.length > 0 || stillOpen.length > 0;
 
     let event: ReviewEvent = "APPROVE";
     if (shouldBlock) {
@@ -105,6 +115,9 @@ export class ReviewPayloadAssembler {
         customSummary,
         totalTokensUsed,
         costUsd,
+        stillOpen.length > 0 || (options.resolvedCount ?? 0) > 0
+          ? { stillOpen: stillOpen.length, resolved: options.resolvedCount ?? 0 }
+          : undefined,
       ) +
       ReviewPayloadAssembler.buildCoverageNotes(
         unanchored,
@@ -157,6 +170,7 @@ export class ReviewPayloadAssembler {
     customSummary?: string,
     totalTokensUsed?: number,
     costUsd?: number,
+    followUp?: { stillOpen: number; resolved: number },
   ): string {
     const counts = { P0: 0, P1: 0, P2: 0, P3: 0, P4: 0 };
     for (const c of comments) {
@@ -175,6 +189,10 @@ export class ReviewPayloadAssembler {
       md += `${customSummary}\n\n`;
     }
 
+    if (followUp) {
+      md += `*Earlier findings: ${followUp.resolved} resolved in this review, ${followUp.stillOpen} still open.*\n\n`;
+    }
+
     md += `### Defect Breakdown\n\n`;
     md += `| Severity | Count | Impact |\n`;
     md += `| :--- | :---: | :--- |\n`;
@@ -184,7 +202,9 @@ export class ReviewPayloadAssembler {
     md += `| **P3 (Minor)** | ${counts.P3} | Maintainability issues, non-blocking logic |\n`;
     md += `| **P4 (Trivial)** | ${counts.P4} | Typos, inaccurate comments or docs |\n\n`;
 
-    if (comments.length === 0) {
+    if (comments.length === 0 && followUp) {
+      md += `*No new defects in these changes.*\n\n`;
+    } else if (comments.length === 0) {
       md += `*No actionable defects identified. The change looks clean and well-structured!* \n\n`;
     } else {
       md += `### Key Findings Overview\n\n`;
