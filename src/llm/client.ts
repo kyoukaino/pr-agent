@@ -88,7 +88,9 @@ export class DeepSeekLLMClient {
             options.timeoutMs ? { signal, timeout: options.timeoutMs } : { signal },
           );
         },
-        { maxRetries: 3 },
+        // Up to 5 retries with full-jitter backoff capped at 2s, 4s, 8s, 16s, 30s: rides out
+        // short network outages (about a minute in total) before the group fails with llm_error.
+        { maxRetries: 5, initialDelayMs: 2000, maxDelayMs: 30_000 },
         signal,
       );
 
