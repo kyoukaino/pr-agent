@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { isGeneratedOrLockfile, parseGitDiff } from "./domain/diff-parser.js";
-import { partitionFileGroups } from "./domain/grouping.js";
+import { groupTokenBudget, partitionFileGroups } from "./domain/grouping.js";
 import { DiffAnchorRelocator } from "./domain/relocator.js";
 import { buildMainTaskMessages } from "./domain/prompt.js";
 import { ReviewPayloadAssembler } from "./domain/assembler.js";
@@ -130,8 +130,11 @@ export class PRAgent {
           return reason === null;
         });
 
-        // 4. Partition into Bounded Semantic Groups
-        const fileGroups = partitionFileGroups(validDiffs, promptTokenCeiling);
+        // 4. Group files: one group when the diff fits, token-bounded packing otherwise
+        const fileGroups = partitionFileGroups(
+          validDiffs,
+          groupTokenBudget(maxContextTokens, warningWatermark),
+        );
 
         // 5. Initialize Checkpoints & Resume State
         this.checkpointStore.appendEvent(runId, "RUN_START", {
