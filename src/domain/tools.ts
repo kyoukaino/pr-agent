@@ -141,6 +141,24 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
   {
     type: "function",
     function: {
+      name: "reply_to_author",
+      description:
+        "Answers the author's reply in a finding's thread (only when asked to answer one). Concede when they are right; otherwise explain with concrete code evidence.",
+      parameters: {
+        type: "object",
+        required: ["message"],
+        properties: {
+          message: {
+            type: "string",
+            description: "Markdown reply posted in the thread.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "task_done",
       description: "Signals that all analysis and reviews for the current file group are finished.",
       parameters: {
@@ -204,6 +222,8 @@ export interface ToolExecutionContext {
   /** Ids already resolved in this review (shared across file groups). */
   resolvedFindingIds?: Set<string>;
   onFindingResolved?: (resolved: { id: string; reason: string }) => void;
+  /** Set only while answering an author's reply; reply_to_author fails otherwise. */
+  onAuthorReply?: (message: string) => void;
   signal?: AbortSignal;
   /**
    * Read-only directories exposed under a path prefix, e.g. { "@ci-logs": "/tmp/pr-agent-ci-x" }.
@@ -278,6 +298,15 @@ export class ToolDispatcher {
         case "resolve_finding":
           res = { result: this.resolveFinding(args) };
           break;
+        case "reply_to_author": {
+          const message = typeof args.message === "string" ? args.message.trim() : "";
+          if (!this.ctx.onAuthorReply)
+            throw new ToolInputError("there is no author reply to answer");
+          if (!message) throw new ToolInputError("'message' is required");
+          this.ctx.onAuthorReply(message);
+          res = { result: "Reply recorded; it will be posted in the thread." };
+          break;
+        }
         case "task_done": {
           const completed = args.state !== "FAILED";
           res = {

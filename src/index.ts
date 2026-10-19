@@ -2,7 +2,13 @@ import { Octokit } from "@octokit/rest";
 import { isGeneratedOrLockfile, parseGitDiff } from "./domain/diff-parser.js";
 import { groupTokenBudget, partitionFileGroups } from "./domain/grouping.js";
 import { DiffAnchorRelocator } from "./domain/relocator.js";
-import { buildFollowUpMessage, buildMainTaskMessages, type PriorFinding } from "./domain/prompt.js";
+import {
+  buildFollowUpMessage,
+  buildMainTaskMessages,
+  buildReplyMessage,
+  buildSystemPrompt,
+  type PriorFinding,
+} from "./domain/prompt.js";
 import {
   routeToGroups,
   type OpenFinding,
@@ -96,6 +102,35 @@ export interface ReviewRunResult {
   resolvedFindings: ResolvedFinding[];
   /** Conversations as they ended, to continue on the next push. */
   session: ReviewSession;
+}
+
+export interface AnswerReplyOptions {
+  owner: string;
+  repo: string;
+  pull_number: number;
+  /** PR head the answer is checked against. */
+  commit_id: string;
+  /** The PR's diff; its files are the ones the agent may comment on. */
+  rawDiff: string;
+  repoDir?: string;
+  /** The finding whose thread got the reply, with the posted comment as `body`. */
+  finding: OpenFinding & { body: string };
+  author: string;
+  reply: string;
+  /** The PR's review conversations; the answer continues the one that reviewed the file. */
+  session?: ReviewSession;
+  systemRule?: string;
+  signal?: AbortSignal;
+}
+
+export interface AnswerReplyResult {
+  /** Text to post in the thread; undefined if the agent gave none. */
+  answer?: string;
+  /** The agent agreed the finding is wrong or fixed. */
+  resolved: boolean;
+  /** The session with the exchange appended (undefined when none was given). */
+  session?: ReviewSession;
+  costUsd: number;
 }
 
 export class PRAgent {
@@ -413,6 +448,53 @@ export class PRAgent {
       runSpan.end();
       throw err;
     }
+  }
+
+  /**
+   * Answers an author's reply in the thread of a posted finding: the agent re-checks the code and
+   * concedes (resolving the finding) or explains why the finding stands.
+   */
+  public async answerReply(options: AnswerReplyOptions): Promise<AnswerReplyResult> {
+    const changedPaths = parseGitDiff(options.rawDiff).files.map((f) => f.path);
+    const engine = new AgentRuntimeEngine({
+      runId: `reply-${options.owner}-${options.repo}-${options.pull_number}-${Date.now()}`,
+      repoDir: options.repoDir || process.cwd(),
+      llmClient: this.llmClient,
+      budgetConfig: this.config.budget,
+      checkpointStore: this.checkpointStore,
+      changedPaths,
+      maxRounds: this.config.limits.maxRounds,
+      openFindingIds: [options.finding.id],
+      answeringReply: true,
+      signal: options.signal,
+    });
+
+    // Continue the conversation that reviewed the file; without a session, start a small one.
+    const groups = options.session ? [...options.session.groups] : [];
+    const owner = groups.findIndex((g) => g.paths.includes(options.finding.path));
+    const index = owner >= 0 ? owner : groups.length - 1;
+    const rules = [...this.config.rules, ...(options.systemRule ? [options.systemRule] : [])];
+    const history: ChatMessage[] =
+      index >= 0
+        ? groups[index].messages
+        : [{ role: "system", content: buildSystemPrompt(rules.join("\n") || undefined) }];
+    const message = buildReplyMessage({
+      finding: options.finding,
+      author: options.author,
+      reply: options.reply,
+      headCommit: options.commit_id,
+    });
+
+    const label = index >= 0 ? groups[index].label : "reply";
+    const res = await engine.executeSubtask(label, [...history, message]);
+    if (index >= 0) groups[index] = { ...groups[index], messages: res.messages };
+
+    return {
+      answer: res.replies.at(-1),
+      resolved: res.resolved.some((r) => r.id === options.finding.id),
+      session: options.session ? { ...options.session, groups } : undefined,
+      costUsd: engine.costUsd,
+    };
   }
 }
 

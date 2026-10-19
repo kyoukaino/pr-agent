@@ -129,6 +129,11 @@ flowchart TD
   - 能增量时只审查自上次审查以来的 diff（只看 PR 改动过的文件），否则全量审查；
   - head 已审查过（重复投递、重新打开 PR）或新提交没有改动 PR 中的任何文件时，直接跳过。
 - **关闭已修复的发现**：发布的每条评论末尾带有隐藏标记 `<!-- pr-agent:finding=<id> -->`。审查前用 GraphQL 读取本 App 发起、仍未解决的讨论，以 `<open_findings>` 列表（带 id）交给 Agent。Agent 核实代码已修复后调用 `resolve_finding(id, reason)`；审查发布后，Worker 在该讨论下回复 "Fixed in <sha>: <reason>" 并将其标为已解决。没有标记的旧评论用 `c<评论 id>` 作为 id。
+- **回复评论**：订阅 `pull_request_review_comment` 事件。当 PR 作者或仓库成员（OWNER / MEMBER / COLLABORATOR）在本 App 某条未解决发现的讨论里回复时，Worker 签出 PR 当前 head，把回复追加到审查过该文件的那段对话中（没有会话时，新开一段只针对这条讨论的对话）。
+  - Agent 重新核对代码后，用 `reply_to_author` 回答一次；作者说得对时，同时调用 `resolve_finding`，讨论随之标为已解决。
+  - 回复内容放在 `<author_reply source="untrusted PR participant">` 中，只当作论据，不当作指令。
+  - 机器人的评论（包括本 App 自己的回复）、新开的讨论、外部人员的评论一律忽略，以免任何人都能在公开仓库上消耗 LLM 额度。
+- **同一 PR 串行执行**：审查和回复都会读写同一份会话，所以 Worker 用一把 Redis 锁（`pr:lock:<repo>:<pr>`，可重入，TTL 1 小时）保证同一 PR 同时只有一个任务；拿不到锁的任务 15 秒后重试。新推送仍然会通过取消广播打断旧的审查，但不会打断正在进行的回复。
 - **行号锚定**：始终以整个 PR 的 diff 为准，因为 GitHub 只接受落在 PR diff 上的评论。增量 diff 中的 `L<n>` 是上次审查时那个提交的行号，不是 base 的行号，所以 prompt 要求发现锚定在 `R<n>` 行上。
 
 ---

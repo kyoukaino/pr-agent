@@ -2,6 +2,15 @@ import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import type { GitHubAppConfig } from "./config.js";
 
+/** A PR participant's reply in the thread of a finding this App posted. */
+export interface AuthorReply {
+  commentId: number;
+  /** First comment of the thread: the finding. */
+  rootCommentId: number;
+  author: string;
+  body: string;
+}
+
 export interface PRReviewJobData {
   jobId: string;
   owner: string;
@@ -14,9 +23,13 @@ export interface PRReviewJobData {
   createdAt: number;
   /** Until when (epoch ms) the review waits for the head commit's CI to finish. */
   ciDeadline: number;
+  /** Set for a job that answers an author's reply instead of reviewing a commit. */
+  reply?: AuthorReply;
 }
 
 const ACTIVE_JOB_TTL_SECONDS = 6 * 60 * 60;
+/** Outlives the longest job (30 min review budget plus checkout and posting); guards crashed workers. */
+const PR_LOCK_TTL_SECONDS = 60 * 60;
 
 export class PRReviewQueueManager {
   public readonly queue: Queue<PRReviewJobData, void, "review_pr">;
@@ -96,6 +109,45 @@ export class PRReviewQueueManager {
       1,
       key,
       jobId,
+    );
+  }
+
+  /**
+   * Takes the PR's lock for `holder`: reviews and reply answers of one PR share its review
+   * conversations, so they run one at a time. Re-entrant for the same holder (job retries).
+   */
+  public async acquirePRLock(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    holder: string,
+  ): Promise<boolean> {
+    const acquired = await this.redis.eval(
+      `local v = redis.call("GET", KEYS[1])
+       if v == false or v == ARGV[1] then
+         redis.call("SET", KEYS[1], ARGV[1], "EX", ARGV[2])
+         return 1
+       end
+       return 0`,
+      1,
+      `pr:lock:${owner}/${repo}:${prNumber}`,
+      holder,
+      PR_LOCK_TTL_SECONDS,
+    );
+    return acquired === 1;
+  }
+
+  public async releasePRLock(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    holder: string,
+  ): Promise<void> {
+    await this.redis.eval(
+      'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end',
+      1,
+      `pr:lock:${owner}/${repo}:${prNumber}`,
+      holder,
     );
   }
 

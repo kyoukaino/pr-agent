@@ -90,6 +90,13 @@ export async function loadOpenFindings(
   return findings;
 }
 
+export async function resolveThread(octokit: Octokit, threadId: string): Promise<void> {
+  await octokit.graphql(
+    `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`,
+    { id: threadId },
+  );
+}
+
 /** Replies with the reason in each fixed finding's thread, then resolves the thread. */
 export async function resolveFindingThreads(
   octokit: Octokit,
@@ -111,10 +118,7 @@ export async function resolveFindingThreads(
       comment_id: finding.commentId,
       body: `Fixed in ${commit.slice(0, 7)}: ${r.reason}`,
     });
-    await octokit.graphql(
-      `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`,
-      { id: finding.threadId },
-    );
+    await resolveThread(octokit, finding.threadId);
     count++;
   }
   return count;

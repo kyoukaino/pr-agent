@@ -12,8 +12,10 @@ import type { GitHubAppAuthManager } from "./auth.js";
 import { checkoutPullRequest } from "./checkout.js";
 import { collectCiContext, fetchCiSnapshot, shouldWaitForCi } from "./ci.js";
 import { fetchIncrementalDiff, loadReviewHistory } from "./history.js";
-import { loadOpenFindings, resolveFindingThreads } from "./threads.js";
+import { loadOpenFindings, resolveFindingThreads, resolveThread } from "./threads.js";
 import type { PRSessionStore } from "./session-store.js";
+
+const PR_LOCK_RETRY_MS = 15_000;
 
 export class PRReviewWorker {
   private worker: Worker<PRReviewJobData>;
@@ -79,7 +81,16 @@ export class PRReviewWorker {
     });
   }
 
+  /** Re-queues the job shortly when another job of the same PR holds its lock. */
+  private async waitForPRLock(job: Job<PRReviewJobData>, bullToken?: string): Promise<void> {
+    const { owner, repo, pull_number, jobId } = job.data;
+    if (await this.queueManager.acquirePRLock(owner, repo, pull_number, jobId)) return;
+    await job.moveToDelayed(Date.now() + PR_LOCK_RETRY_MS, bullToken);
+    throw new DelayedError();
+  }
+
   private async processJob(job: Job<PRReviewJobData>, bullToken?: string): Promise<void> {
+    if (job.data.reply) return this.processReply(job, bullToken);
     const data = job.data;
     const isCurrent = async () =>
       (await this.queueManager.getActiveJob(data.owner, data.repo, data.pull_number)) ===
@@ -116,6 +127,9 @@ export class PRReviewWorker {
           `\n[Worker] Processing PR Review for ${data.owner}/${data.repo}#${data.pull_number} (Commit: ${data.commit_id.slice(0, 7)})...`,
         ),
       );
+
+      // Reviews and reply answers of this PR share its conversations: one at a time.
+      await this.waitForPRLock(job, bullToken);
 
       // 3. Earlier reviews by this App: a push after a review is reviewed incrementally, the
       // findings already posted are never repeated, and open ones can be resolved once fixed.
@@ -289,11 +303,115 @@ export class PRReviewWorker {
       this.activeTasks.delete(data.jobId);
       await cleanup?.().catch(() => undefined);
       ciCleanup?.();
+      await this.queueManager
+        .releasePRLock(data.owner, data.repo, data.pull_number, data.jobId)
+        .catch(() => undefined);
       if (finished) {
         await this.queueManager
           .clearActiveJob(data.owner, data.repo, data.pull_number, data.jobId)
           .catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Answers a reply in the thread of one of this App's findings: the agent re-checks the code at
+   * the PR head, then the answer is posted in the thread, which is resolved if the agent concedes.
+   */
+  private async processReply(job: Job<PRReviewJobData>, bullToken?: string): Promise<void> {
+    const data = job.data;
+    const reply = data.reply!;
+    let cleanup: (() => Promise<void>) | undefined;
+    try {
+      const { octokit, token } = await this.authManager.getInstallationClient(data.installationId);
+      const botLogin = await this.authManager.getBotLogin();
+      const { data: root } = await octokit.rest.pulls.getReviewComment({
+        owner: data.owner,
+        repo: data.repo,
+        comment_id: reply.rootCommentId,
+      });
+      if (root.user?.login !== botLogin) return; // a thread someone else started
+
+      await this.waitForPRLock(job, bullToken);
+
+      // Only open findings are discussed; a resolved thread is settled.
+      const open = await loadOpenFindings(
+        octokit,
+        data.owner,
+        data.repo,
+        data.pull_number,
+        botLogin,
+      );
+      const finding = open.find((f) => f.commentId === root.id);
+      if (!finding) return;
+      const { data: pull } = await octokit.rest.pulls.get({
+        owner: data.owner,
+        repo: data.repo,
+        pull_number: data.pull_number,
+      });
+      if (pull.state !== "open") return;
+
+      console.log(
+        pc.cyan(
+          `
+[Worker] Answering ${reply.author}'s reply on ${data.owner}/${data.repo}#${data.pull_number} (finding ${finding.id})...`,
+        ),
+      );
+      const { data: rawDiff } = await octokit.rest.pulls.get({
+        owner: data.owner,
+        repo: data.repo,
+        pull_number: data.pull_number,
+        mediaType: { format: "diff" },
+      });
+      const checkout = await checkoutPullRequest({
+        owner: data.owner,
+        repo: data.repo,
+        pullNumber: data.pull_number,
+        headSha: pull.head.sha,
+        token,
+      });
+      cleanup = checkout.cleanup;
+
+      const { config } = await loadConfig({
+        overrides: { model: data.model || this.config.model },
+      });
+      const saved = this.sessionStore.load(data.owner, data.repo, data.pull_number);
+      const result = await new PRAgent(config).answerReply({
+        owner: data.owner,
+        repo: data.repo,
+        pull_number: data.pull_number,
+        commit_id: pull.head.sha,
+        rawDiff: rawDiff as unknown as string,
+        repoDir: checkout.dir,
+        finding: { ...finding, body: root.body },
+        author: reply.author,
+        reply: reply.body,
+        session: saved?.model === config.model ? saved : undefined,
+      });
+
+      if (result.answer) {
+        await octokit.rest.pulls.createReplyForReviewComment({
+          owner: data.owner,
+          repo: data.repo,
+          pull_number: data.pull_number,
+          comment_id: root.id,
+          body: result.answer,
+        });
+      }
+      if (result.resolved) await resolveThread(octokit, finding.threadId);
+      if (result.session) {
+        this.sessionStore.save(data.owner, data.repo, data.pull_number, result.session);
+      }
+      console.log(
+        pc.green(
+          `[Worker] Answered reply (${result.resolved ? "finding resolved" : "finding stands"}, $${result.costUsd.toFixed(4)}).`,
+        ),
+      );
+    } finally {
+      await cleanup?.().catch(() => undefined);
+      await this.queueManager
+        .releasePRLock(data.owner, data.repo, data.pull_number, data.jobId)
+        .catch(() => undefined);
     }
   }
 

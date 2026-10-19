@@ -150,7 +150,8 @@ Webhook URL 默认是一个无法解析的占位地址：使用 Quick Tunnel 时
 
 勾选以下 Webhook 事件监听：
 
-- `[x] Pull request`：监听 PR 创建（`opened`）与推送新 Commit（`synchronize`）。
+- `[x] Pull request`：监听 PR 创建（`opened`）、推送新 Commit（`synchronize`），以及关闭（`closed`，用于删除该 PR 的会话）。
+- `[x] Pull request review comment`：监听作者在发现讨论中的回复，由 Agent 作答（见 [RFC 3.6](../architecture/github-app-deployment-rfc.md#36-会话延续增量重审与发现关闭)）。
 
 等待 CI 采用轮询，不需要订阅 `check_suite` 等额外事件（见 [RFC 3.5](../architecture/github-app-deployment-rfc.md#35-等待-ci-与-ci-上下文)）。
 
