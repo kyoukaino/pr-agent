@@ -5,8 +5,8 @@ on:
   push:
     branches: [main]
 
-# A newer push to the same PR makes the running check obsolete; runs on main are
-# kept so every merged commit gets a completed CI result.
+# A newer push to the same PR makes the running check obsolete. On main a running check is
+# never cancelled, but a newer queued run still replaces one that is waiting to start.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
