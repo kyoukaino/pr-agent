@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Multi-stage build following the Vite+ Docker guide: build with the official toolchain image,
 # install production dependencies in a separate stage, run on a slim glibc image without vp.
 
