@@ -4,6 +4,7 @@ import { GitHubAppAuthManager } from "./auth.js";
 import { PRReviewQueueManager } from "./queue.js";
 import { PRReviewWorker } from "./worker.js";
 import { createWebhookServer } from "./server.js";
+import { startWebhookTunnelSync } from "./tunnel.js";
 
 export * from "./config.js";
 export * from "./auth.js";
@@ -11,6 +12,7 @@ export * from "./queue.js";
 export * from "./worker.js";
 export * from "./server.js";
 export * from "./ci.js";
+export * from "./tunnel.js";
 
 /**
  * Boots the unified GitHub App server and BullMQ worker instance for private single-tenant deployment.
@@ -26,6 +28,9 @@ export async function startGitHubApp(): Promise<void> {
   const queueManager = new PRReviewQueueManager(config);
   const worker = new PRReviewWorker(config, authManager, queueManager);
   const server = createWebhookServer(config, queueManager);
+  const stopTunnelSync = config.tunnelMetricsUrl
+    ? startWebhookTunnelSync(config, config.tunnelMetricsUrl)
+    : undefined;
 
   server.listen(config.port, () => {
     console.log(pc.green(`✓ Webhook Server listening on http://0.0.0.0:${config.port}/webhook`));
@@ -37,6 +42,7 @@ export async function startGitHubApp(): Promise<void> {
 
   const shutdown = async () => {
     console.log(pc.yellow("\nShutting down GitHub App gracefully..."));
+    stopTunnelSync?.();
     server.close();
     await worker.close();
     await queueManager.close();

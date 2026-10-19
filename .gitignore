@@ -5,6 +5,9 @@ dist/
 
 # Secrets
 .env
+.env.*
+!.env.example
+*.pem
 
 # Local runtime state (sessions, traces, dashboard database)
 .pr-agent/

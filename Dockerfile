@@ -1,58 +1,63 @@
-# ===================================================
-# Stage 1: Build & Package with Vite+ (vp pack)
-# ===================================================
-FROM node:22-slim AS builder
+# syntax=docker/dockerfile:1
+# Multi-stage build following the Vite+ Docker guide: build with the official toolchain image,
+# install production dependencies in a separate stage, run on a slim glibc image without vp.
 
+# ===================================================
+# Stage 1: build with the Vite+ toolchain
+# ===================================================
+FROM ghcr.io/voidzero-dev/vite-plus:latest AS build
 WORKDIR /app
 
-# Install git and pnpm
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Dependencies first so this layer is cached across source changes.
+# vp provisions the Node.js and pnpm versions pinned in package.json (devEngines / packageManager).
+COPY --chown=vp:vp package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+RUN vp install --frozen-lockfile
 
-# Copy dependency manifests
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc* ./
+COPY --chown=vp:vp tsconfig.json vite.config.ts pr-agent.config.ts ./
+COPY --chown=vp:vp src/ ./src/
+RUN vp pack
 
-# Install dependencies (respecting pnpm lockfile)
-RUN pnpm install --frozen-lockfile
-
-# Copy application source code and configs
-COPY tsconfig.json vite.config.ts pr-agent.config.ts ./
-COPY src/ ./src/
-
-# Package library & CLI distribution using Vite+ (tsdown / rolldown)
-RUN pnpm run build
-
-# Prune development dependencies to keep production footprint minimal
-RUN pnpm prune --prod
+# Export the exact resolved Node.js binary for the runtime stage.
+RUN cp "$(vp env which node | head -1)" /tmp/node
 
 # ===================================================
-# Stage 2: Production Lightweight Runtime Image
+# Stage 2: production-only dependencies
 # ===================================================
-FROM node:22-slim AS runner
+# A fresh --prod install: running --prod over the full install above would not prune devDependencies.
+FROM ghcr.io/voidzero-dev/vite-plus:latest AS deps
+WORKDIR /app
+COPY --chown=vp:vp package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+RUN vp install --frozen-lockfile --prod
 
+# ===================================================
+# Stage 3: runtime
+# ===================================================
+FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
-# Install git (required for diff parsing and repo inspections)
+# git fetches the PR head for the context tools; ca-certificates for HTTPS to GitHub and the LLM API.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /tmp/node /usr/local/bin/node
 
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Security: run as non-root user
-RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 pragent
+# Non-root user with a home directory (git writes its config and temp checkouts there).
+RUN groupadd --system --gid 1001 pragent \
+    && useradd --system --uid 1001 --gid pragent --create-home pragent
+COPY --from=deps --chown=pragent:pragent /app/node_modules ./node_modules
+COPY --from=build --chown=pragent:pragent /app/dist ./dist
+COPY --from=build --chown=pragent:pragent /app/package.json /app/pr-agent.config.ts ./
+
+# Sessions, traces and the SQLite trace store (mounted as a volume in docker-compose).
+RUN mkdir -p /app/.pr-agent && chown pragent:pragent /app/.pr-agent
 USER pragent
 
-# Copy built distribution, production modules, and configuration
-COPY --from=builder --chown=pragent:nodejs /app/package.json ./package.json
-COPY --from=builder --chown=pragent:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=pragent:nodejs /app/dist ./dist
-COPY --from=builder --chown=pragent:nodejs /app/pr-agent.config.ts ./pr-agent.config.ts
-
-# Create session & trace persistence directory
-RUN mkdir -p /app/.pr-agent/sessions /app/.pr-agent/traces
-
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 
-# Default: start the private GitHub App Webhook server & BullMQ Worker daemon
+# Webhook server and BullMQ worker in one process
 CMD ["node", "dist/cli.mjs", "server"]
