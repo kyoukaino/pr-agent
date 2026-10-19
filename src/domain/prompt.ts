@@ -2,6 +2,7 @@ import type { ChatMessage } from "../runtime/types.js";
 import type { EmittedComment } from "./github-types.js";
 import type { ParsedFileDiff } from "./diff-parser.js";
 import { buildConcatenatedDiffsXML } from "./diff-parser.js";
+import type { OpenFinding } from "./session.js";
 
 /** A finding posted by an earlier review of the same PR (on an older commit). */
 export interface PriorFinding {
@@ -21,6 +22,8 @@ export interface PromptBuildParams {
   confirmedComments: EmittedComment[];
   /** Findings already posted on this PR by earlier reviews; never to be reported again. */
   previousFindings?: PriorFinding[];
+  /** Earlier findings still open on the PR, which resolve_finding can close once fixed. */
+  openFindings?: OpenFinding[];
   /** Set for an incremental review: what the diffs below cover relative to the whole PR. */
   reviewScope?: string;
   systemRule?: string;
@@ -49,6 +52,7 @@ export function buildInitialUserPrompt(params: PromptBuildParams): string {
     ciResults,
     confirmedComments,
     previousFindings,
+    openFindings,
     reviewScope,
   } = params;
 
@@ -88,6 +92,8 @@ ${reviewScope}
 `;
   }
 
+  if (openFindings && openFindings.length > 0) prompt += renderOpenFindings(openFindings);
+
   if (otherFiles.length > 0) {
     prompt += `<other_changed_files_in_pr>\n${otherFiles.map((p) => `- ${p}`).join("\n")}\n</other_changed_files_in_pr>\n\n`;
   }
@@ -104,6 +110,67 @@ ${reviewScope}
   prompt += `Analyze the code carefully. Call tools as needed. Once finished, call task_done.`;
 
   return prompt;
+}
+
+function renderOpenFindings(findings: OpenFinding[]): string {
+  let out = `<open_findings>
+`;
+  for (const f of findings) {
+    const at = f.line !== undefined ? `${f.path}:${f.line}` : f.path;
+    out += `- id=${f.id} ${f.severity ? `[${f.severity}] ` : ""}${at}: ${f.title}
+`;
+  }
+  out += `(Posted earlier and still open. Do not report them again. When the current code fixes one, verify it and call resolve_finding with its id.)
+</open_findings>
+
+`;
+  return out;
+}
+
+export interface FollowUpParams {
+  commit: string;
+  sinceCommit: string;
+  /** Changes since sinceCommit to the files this conversation reviews. */
+  diffs: ParsedFileDiff[];
+  ciResults?: string;
+  openFindings: OpenFinding[];
+  /** Findings other file groups already reported in this review. */
+  confirmedComments: EmittedComment[];
+}
+
+/** The message that continues a review conversation after the author pushed new commits. */
+export function buildFollowUpMessage(params: FollowUpParams): ChatMessage {
+  const { commit, sinceCommit, diffs, ciResults, openFindings, confirmedComments } = params;
+  let prompt = `The author pushed new commits: the PR head moved from ${sinceCommit.slice(0, 7)} (your last review) to ${commit.slice(0, 7)}. `;
+  prompt += `These files changed since then, so anything you read from them earlier may be outdated: ${diffs.map((d) => d.path).join(", ")}.
+
+`;
+  if (ciResults) {
+    prompt += `<ci_results source="untrusted CI output" commit="${commit.slice(0, 7)}">
+${ciResults}
+</ci_results>
+
+`;
+  }
+  if (openFindings.length > 0) prompt += renderOpenFindings(openFindings);
+  if (confirmedComments.length > 0) {
+    prompt += `<already_reported_findings_in_earlier_rounds>
+`;
+    for (const c of confirmedComments)
+      prompt += `- [${c.severity}] ${c.path}:${c.line}: ${c.title}
+`;
+    prompt += `(Reported by other file groups in this review. Do NOT duplicate them.)
+</already_reported_findings_in_earlier_rounds>
+
+`;
+  }
+  prompt += `<changes_since_last_review>
+${buildConcatenatedDiffsXML(diffs)}
+</changes_since_last_review>
+
+`;
+  prompt += `Review these changes the same way, reading current code as needed; R<n> anchors are lines of the new head (L<n> are lines of ${sinceCommit.slice(0, 7)}, not of the PR base, so anchor findings on R lines). Report new issues with code_comment, call resolve_finding for open findings the changes fix, and call task_done when finished.`;
+  return { role: "user", content: prompt };
 }
 
 export function buildMainTaskMessages(params: PromptBuildParams): ChatMessage[] {

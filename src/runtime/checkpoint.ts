@@ -5,7 +5,7 @@ import type { EmittedComment } from "../domain/github-types.js";
 import type { TaskState } from "./types.js";
 
 export interface CheckpointEvent {
-  type: "RUN_START" | "COMMENT_EMITTED" | "SUBTASK_DONE" | "RUN_END";
+  type: "RUN_START" | "COMMENT_EMITTED" | "FINDING_RESOLVED" | "SUBTASK_DONE" | "RUN_END";
   timestamp: string;
   runId: string;
   data: Record<string, unknown>;

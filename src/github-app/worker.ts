@@ -12,6 +12,8 @@ import type { GitHubAppAuthManager } from "./auth.js";
 import { checkoutPullRequest } from "./checkout.js";
 import { collectCiContext, fetchCiSnapshot, shouldWaitForCi } from "./ci.js";
 import { fetchIncrementalDiff, loadReviewHistory } from "./history.js";
+import { loadOpenFindings, resolveFindingThreads } from "./threads.js";
+import type { PRSessionStore } from "./session-store.js";
 
 export class PRReviewWorker {
   private worker: Worker<PRReviewJobData>;
@@ -22,6 +24,7 @@ export class PRReviewWorker {
     private config: GitHubAppConfig,
     private authManager: GitHubAppAuthManager,
     private queueManager: PRReviewQueueManager,
+    private sessionStore: PRSessionStore,
   ) {
     const redisOptions = {
       host: config.redis.host,
@@ -114,14 +117,15 @@ export class PRReviewWorker {
         ),
       );
 
-      // 3. Earlier reviews by this App: a push after a review is reviewed incrementally, and the
-      // findings already posted are never repeated.
+      // 3. Earlier reviews by this App: a push after a review is reviewed incrementally, the
+      // findings already posted are never repeated, and open ones can be resolved once fixed.
+      const botLogin = await this.authManager.getBotLogin();
       const history = await loadReviewHistory(
         octokit,
         data.owner,
         data.repo,
         data.pull_number,
-        await this.authManager.getBotLogin(),
+        botLogin,
       );
       if (history.lastReviewedCommit === data.commit_id) {
         console.log(pc.yellow(`[Worker] Commit ${data.commit_id.slice(0, 7)} already reviewed.`));
@@ -137,6 +141,15 @@ export class PRReviewWorker {
             data.commit_id,
           )
         : undefined;
+      const openFindings = await loadOpenFindings(
+        octokit,
+        data.owner,
+        data.repo,
+        data.pull_number,
+        botLogin,
+      );
+      const openTitles = new Set(openFindings.map((f) => f.title));
+      const previousFindings = history.findings.filter((f) => !openTitles.has(f.title));
 
       // 4. PR description and CI results give the agent the author's intent and objective evidence.
       const { data: pull } = await octokit.rest.pulls.get({
@@ -194,8 +207,18 @@ export class PRReviewWorker {
       });
       const agent = new PRAgent(config);
 
+      // The saved conversations continue only if they ended exactly at the last posted review and
+      // used the same model; otherwise the review starts fresh from GitHub's record.
+      const saved = this.sessionStore.load(data.owner, data.repo, data.pull_number);
+      const session =
+        incrementalDiff !== undefined &&
+        saved?.reviewedCommit === history.lastReviewedCommit &&
+        saved?.model === config.model
+          ? saved
+          : undefined;
+
       // 8. Run autonomous review; a cancel broadcast aborts it mid-flight
-      const reviewPayload = await agent.reviewPR({
+      const result = await agent.runReview({
         owner: data.owner,
         repo: data.repo,
         pull_number: data.pull_number,
@@ -205,13 +228,16 @@ export class PRReviewWorker {
         background,
         ciResults: ci.summary || undefined,
         ciLogsDir: ci.logsDir,
-        previousFindings: history.findings,
+        previousFindings,
+        openFindings,
+        session,
         incremental:
           incrementalDiff !== undefined && history.lastReviewedCommit
             ? { sinceCommit: history.lastReviewedCommit, rawDiff: incrementalDiff }
             : undefined,
         signal: cancellationTree.signal,
       });
+      const reviewPayload = result.payload;
 
       if (cancellationTree.isAborted || !(await isCurrent())) {
         console.log(
@@ -224,11 +250,30 @@ export class PRReviewWorker {
       // 9. Post review payload directly to GitHub
       console.log(
         pc.green(
-          `[Worker] Posting review to GitHub (${reviewPayload.event}, ${reviewPayload.comments.length} comments)...`,
+          `[Worker] Posting review to GitHub (${reviewPayload.event}, ${reviewPayload.comments.length} comments, ${session ? "continued" : "new"} session)...`,
         ),
       );
       await octokit.rest.pulls.createReview(reviewPayload);
       finished = true;
+      this.sessionStore.save(data.owner, data.repo, data.pull_number, result.session);
+
+      // 10. Close the threads of findings the agent verified as fixed
+      if (result.resolvedFindings.length > 0) {
+        try {
+          const n = await resolveFindingThreads(
+            octokit,
+            data.owner,
+            data.repo,
+            data.pull_number,
+            data.commit_id,
+            openFindings,
+            result.resolvedFindings,
+          );
+          console.log(pc.green(`[Worker] Resolved ${n} fixed finding(s).`));
+        } catch (err) {
+          console.error(pc.yellow(`[Worker] Resolving threads failed: ${(err as Error).message}`));
+        }
+      }
     } catch (err) {
       // Waiting for CI: the job comes back later and must still own the active marker.
       if (err instanceof DelayedError) throw err;

@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import pc from "picocolors";
 import type { GitHubAppConfig } from "./config.js";
 import type { PRReviewQueueManager } from "./queue.js";
+import type { PRSessionStore } from "./session-store.js";
 
 // GitHub caps webhook payloads at 25 MB.
 const MAX_WEBHOOK_BODY_BYTES = 25 * 1024 * 1024;
@@ -24,6 +25,7 @@ export function verifyWebhookSignature(
 export function createWebhookServer(
   config: GitHubAppConfig,
   queueManager: PRReviewQueueManager,
+  sessionStore?: PRSessionStore,
 ): http.Server {
   return http.createServer(async (req, res) => {
     // 1. Health check endpoint
@@ -98,6 +100,14 @@ export function createWebhookServer(
       }
 
       const action = payload.action;
+      // A closed (or merged) PR's review conversations are no longer needed.
+      if (action === "closed" && payload.repository && payload.pull_request) {
+        sessionStore?.delete(
+          payload.repository.owner.login,
+          payload.repository.name,
+          payload.pull_request.number,
+        );
+      }
       if (action !== "opened" && action !== "synchronize" && action !== "reopened") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ message: `Ignored PR action: ${action}` }));

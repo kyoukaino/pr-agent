@@ -118,16 +118,18 @@ flowchart TD
   - **工具定义不变**：有没有 CI 都使用同一套工具，不同审查之间共享工具定义的前缀缓存。
   - 注解或日志获取失败只会让上下文变少，不会让审查失败。
 
-### 3.6 增量重审与发现去重
+### 3.6 会话延续、增量重审与发现关闭
 
-- **源码落地**：[`src/github-app/history.ts`](../../src/github-app/history.ts)、[`src/github-app/worker.ts`](../../src/github-app/worker.ts)
-- **问题**：每次推送都全量重审会把已经报过的问题换个说法再报一次（例如采纳一条 suggestion 后），还会重复花费审查整个 PR 的成本。
-- **审查历史**：Worker 读取该 PR 上本 App（`<slug>[bot]`）发布过的审查。最近一次审查的 `commit_id` 是上次审查到的提交；各次审查摘要 "Key Findings Overview" 中的条目（级别、位置、标题）是已发布的发现，包括没能锚定到行的发现。
-- **增量范围**：
-  - 新 head 是上次审查提交的后代（`compare` 状态为 `ahead`）时，只审查两者之间的 diff，并且只看 PR 改动过的文件（合并 base 分支带进来的其他文件不审）。整个 PR 的 diff 仍用于行号锚定，因为 GitHub 只接受落在 PR diff 上的评论。
-  - force-push 或 rebase 后旧提交不再是祖先，退回全量审查。
-  - 新提交没有改动 PR 中的任何文件，或者 head 已经审查过（重复投递、重新打开 PR）时，不审查、不发布。
-- **去重**：已发布的发现以 `<findings_from_previous_reviews>` 区段注入，要求模型不得重复（包括换说法、换行号）。它与同一次审查内各文件组之间的 `confirmedComments` 去重互相独立。
+- **源码落地**：[`src/domain/session.ts`](../../src/domain/session.ts)、[`src/github-app/history.ts`](../../src/github-app/history.ts)、[`src/github-app/threads.ts`](../../src/github-app/threads.ts)、[`src/github-app/session-store.ts`](../../src/github-app/session-store.ts)、[`src/github-app/worker.ts`](../../src/github-app/worker.ts)
+- **问题**：每次推送都从零审查，会把已报过的问题换个说法再报一遍，Agent 也不知道自己之前读过、验证过什么；作者修复问题后，旧评论一直挂着不关闭。
+- **会话（一个 PR 一份）**：审查结束并成功发布后，每个文件组的完整对话保存在 `.pr-agent/pr-sessions/<owner>/<repo>/<pr>.json`（写临时文件后原子改名）。PR 关闭或合并时删除。
+- **新推送接着原会话**：只要会话审查到的提交就是 GitHub 上本 App 最近一次审查的提交，且模型没变，就在原对话末尾追加一条消息，内容包括新旧提交、变更的文件（之前读到的内容可能已过时）、新提交的 CI 结果、仍未解决的发现，以及自上次审查以来的 diff。变更按文件路由到当初审查该文件的对话；PR 新增的文件归入最后一组。冻结区和既有消息保持不变，前缀缓存继续命中。
+- **GitHub 是事实来源，会话只是加速**：会话缺失（例如 VM 重建）、与 GitHub 不一致、换了模型，或者 force-push 导致无法增量时，就新开会话，并把 GitHub 上的历史作为种子：
+  - 本 App 各次审查摘要 "Key Findings Overview" 中的发现，作为"不得重复"的列表；
+  - 能增量时只审查自上次审查以来的 diff（只看 PR 改动过的文件），否则全量审查；
+  - head 已审查过（重复投递、重新打开 PR）或新提交没有改动 PR 中的任何文件时，直接跳过。
+- **关闭已修复的发现**：发布的每条评论末尾带有隐藏标记 `<!-- pr-agent:finding=<id> -->`。审查前用 GraphQL 读取本 App 发起、仍未解决的讨论，以 `<open_findings>` 列表（带 id）交给 Agent。Agent 核实代码已修复后调用 `resolve_finding(id, reason)`；审查发布后，Worker 在该讨论下回复 "Fixed in <sha>: <reason>" 并将其标为已解决。没有标记的旧评论用 `c<评论 id>` 作为 id。
+- **行号锚定**：始终以整个 PR 的 diff 为准，因为 GitHub 只接受落在 PR diff 上的评论。增量 diff 中的 `L<n>` 是上次审查时那个提交的行号，不是 base 的行号，所以 prompt 要求发现锚定在 `R<n>` 行上。
 
 ---
 
