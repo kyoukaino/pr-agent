@@ -21,11 +21,20 @@ export class GitHubAppAuthManager {
     return { octokit: new Octokit({ auth: token }), token };
   }
 
+  /**
+   * Octokit authenticated as the App itself (JWT), for /app endpoints such as the webhook config.
+   * auth-app's request hook does not route those to the JWT, so the token is minted explicitly;
+   * it expires after 10 minutes, so take a fresh client per use.
+   */
+  public async getAppOctokit(): Promise<Octokit> {
+    const { token } = await this.auth({ type: "app" });
+    return new Octokit({ auth: token });
+  }
+
   /** Login the App posts reviews as (`<slug>[bot]`), looked up once with the App's JWT. */
   public async getBotLogin(): Promise<string> {
     if (!this.botLogin) {
-      const { token } = await this.auth({ type: "app" });
-      const { data: app } = await new Octokit({ auth: token }).rest.apps.getAuthenticated();
+      const { data: app } = await (await this.getAppOctokit()).rest.apps.getAuthenticated();
       if (!app?.slug) throw new Error("Cannot resolve the GitHub App's slug.");
       this.botLogin = `${app.slug}[bot]`;
     }

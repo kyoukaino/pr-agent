@@ -101,7 +101,7 @@ docker compose ps
 
 ### 2.4 Webhook 入口：Cloudflare Tunnel
 
-- **Quick Tunnel（默认，无需域名）**：cloudflared 分配一个随机的 `*.trycloudflare.com` 地址，每次重启都会变化。服务通过 cloudflared metrics 的 `/quicktunnel` 接口读取当前地址，启动时及之后每分钟检查一次，变化时用 App 身份调用 `PATCH /app/hook/config` 更新 Webhook URL。地址切换的间隙中投递的事件会丢失（可在 App 的 Advanced 页面手动重新投递）；Quick Tunnel 本身也不保证可用性。
+- **Quick Tunnel（默认，无需域名）**：cloudflared 分配一个随机的 `*.trycloudflare.com` 地址，每次重启都会变化。服务通过 cloudflared metrics 的 `/quicktunnel` 接口读取当前地址，启动时及之后每分钟检查一次，变化时用 App 身份调用 `PATCH /app/hook/config` 更新 Webhook URL。地址切换间隙中投递失败的 PR 事件不会丢：Webhook 重新指向隧道后，服务会读取 `/app/hook/deliveries`，重新投递 24 小时内所有尝试都失败的 `pull_request` 事件（不使用隧道时，在服务启动时做一次）。已审查过的提交会被 Worker 跳过，所以重复投递不会导致重复审查。Quick Tunnel 本身不保证可用性。
 - **Named Tunnel（固定域名，推荐长期使用）**：在 Cloudflare 后台创建隧道，把主机名路由到 `http://pr-agent:3000`；`.env` 中设置 `CLOUDFLARE_TUNNEL_TOKEN`，并把 `CLOUDFLARED_METRICS_URL` 置空；将 compose 中 `tunnel` 的 command 换成 `tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}`；最后在 App 设置中把 Webhook URL 改为 `https://<主机名>/webhook`。
 
 ---
