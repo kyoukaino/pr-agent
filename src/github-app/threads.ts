@@ -12,9 +12,6 @@ export interface ThreadFinding extends OpenFinding {
   body: string;
 }
 
-/** Tag on a finding comment marked fixed in place, for when the thread itself cannot be resolved. */
-const RESOLVED_MARKER = "<!-- pr-agent:resolved -->";
-
 interface ThreadsPage {
   repository: {
     pullRequest: {
@@ -78,7 +75,6 @@ export async function loadOpenFindings(
     for (const t of threads.nodes) {
       const first = t.comments.nodes[0];
       if (t.isResolved || !first || !isBot(first.author?.login)) continue;
-      if (first.body.includes(RESOLVED_MARKER)) continue;
       const head = FINDING_HEAD.exec(first.body);
       if (!head) continue;
       findings.push({
@@ -98,36 +94,14 @@ export async function loadOpenFindings(
 }
 
 /**
- * Closes a fixed finding: resolves its thread, or, when GitHub refuses that to the App (the
- * resolveReviewThread mutation answers "Resource not accessible by integration" with only
- * pull_requests: write), marks the finding comment itself as resolved. Either way it is no longer
- * listed as open.
+ * Marks a finding's thread resolved. GitHub requires the App to hold contents: write for this
+ * mutation; with only pull_requests: write it answers "Resource not accessible by integration".
  */
-export async function closeFinding(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  finding: ThreadFinding,
-  commit: string,
-): Promise<"resolved" | "marked"> {
-  try {
-    await octokit.graphql(
-      `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`,
-      { id: finding.threadId },
-    );
-    return "resolved";
-  } catch {
-    await octokit.rest.pulls.updateReviewComment({
-      owner,
-      repo,
-      comment_id: finding.commentId,
-      body: `> ✅ **Resolved in ${commit.slice(0, 7)}**
-
-${finding.body}
-${RESOLVED_MARKER}`,
-    });
-    return "marked";
-  }
+export async function resolveThread(octokit: Octokit, threadId: string): Promise<void> {
+  await octokit.graphql(
+    `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`,
+    { id: threadId },
+  );
 }
 
 /** Replies with the reason in each fixed finding's thread, then resolves the thread. */
@@ -151,7 +125,7 @@ export async function resolveFindingThreads(
       comment_id: finding.commentId,
       body: `Fixed in ${commit.slice(0, 7)}: ${r.reason}`,
     });
-    await closeFinding(octokit, owner, repo, finding, commit);
+    await resolveThread(octokit, finding.threadId);
     count++;
   }
   return count;

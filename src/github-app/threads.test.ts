@@ -34,11 +34,6 @@ describe("open findings from review threads", () => {
         thread({ id: "T2", isResolved: true }, findingBody("Already resolved", "fdone00")),
         thread({ id: "T3" }, "Looks good to me", "a-human"),
         thread({ id: "T4", line: null, originalLine: 4 }, legacy),
-        // Marked fixed in place earlier: no longer open although the thread is unresolved
-        thread(
-          { id: "T5" },
-          `> ✅ **Resolved in abc1234**\n\n${tagged}\n<!-- pr-agent:resolved -->`,
-        ),
       ]),
     } as unknown as Octokit;
 
@@ -78,42 +73,22 @@ describe("resolveFindingThreads", () => {
     { id: "unknown", reason: "-" },
   ];
 
-  function fakeOctokit(canResolve: boolean) {
+  it("replies with the reason and resolves only the threads of resolved findings", async () => {
     const log: string[] = [];
     const octokit = {
       rest: {
         pulls: {
           createReplyForReviewComment: async (p: { comment_id: number; body: string }) =>
             log.push(`reply ${p.comment_id}: ${p.body}`),
-          updateReviewComment: async (p: { comment_id: number; body: string }) =>
-            log.push(`edit ${p.comment_id}: ${p.body}`),
         },
       },
-      graphql: async (_q: string, vars: { id: string }) => {
-        if (!canResolve) throw new Error("Resource not accessible by integration");
-        log.push(`resolve ${vars.id}`);
-      },
+      graphql: async (_q: string, vars: { id: string }) => log.push(`resolve ${vars.id}`),
     } as unknown as Octokit;
-    return { octokit, log };
-  }
-
-  it("replies with the reason and resolves only the threads of resolved findings", async () => {
-    const { octokit, log } = fakeOctokit(true);
-    expect(await resolveFindingThreads(octokit, "o", "r", 1, "c10201f0000", open, resolved)).toBe(
-      1,
-    );
+    const n = await resolveFindingThreads(octokit, "o", "r", 1, "c10201f0000", open, resolved);
+    expect(n).toBe(1);
     expect(log).toEqual([
       "reply 2: Fixed in c10201f: the comment now states the real guarantee",
       "resolve TB",
-    ]);
-  });
-
-  it("marks the finding comment resolved when GitHub refuses to resolve the thread", async () => {
-    const { octokit, log } = fakeOctokit(false);
-    await resolveFindingThreads(octokit, "o", "r", 1, "c10201f0000", open, resolved);
-    expect(log).toEqual([
-      "reply 2: Fixed in c10201f: the comment now states the real guarantee",
-      "edit 2: > ✅ **Resolved in c10201f**\n\n**B**\n<!-- pr-agent:resolved -->",
     ]);
   });
 });

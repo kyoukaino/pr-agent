@@ -54,7 +54,8 @@ const server = http.createServer(async (req, res) => {
       default_events: ["pull_request", "pull_request_review_comment"],
       default_permissions: {
         pull_requests: "write",
-        contents: "read",
+        // write: resolving a fixed finding's review thread requires it (the App never pushes)
+        contents: "write",
         metadata: "read",
         checks: "read",
         statuses: "read",

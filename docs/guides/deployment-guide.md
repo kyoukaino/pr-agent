@@ -135,14 +135,14 @@ Webhook URL 默认是一个无法解析的占位地址：使用 Quick Tunnel 时
 
 在 Permissions 页面为应用分配以下最小特权：
 
-| 权限项 (Permission) | 访问级别 (Access) | 设立原因                                                    |
-| :------------------ | :---------------- | :---------------------------------------------------------- |
-| **Pull Requests**   | **Read & Write**  | 读取 PR 变更信息并在 PR 下批量提交行级内联评论与审查结论    |
-| **Contents**        | **Read-only**     | 在隔离临时区浅克隆代码，以便执行 `read_file` 和 `grep_code` |
-| **Metadata**        | **Read-only**     | (默认要求) 检索基础仓库元数据                               |
-| **Checks**          | **Read-only**     | 读取 head commit 的检查结果与失败注解，作为审查的 CI 上下文 |
-| **Commit statuses** | **Read-only**     | 读取 Jenkins 等外部 CI 写入的提交状态                       |
-| **Actions**         | **Read-only**     | 下载失败的 GitHub Actions 任务日志，供 Agent 按需读取       |
+| 权限项 (Permission) | 访问级别 (Access) | 设立原因                                                                                                                |
+| :------------------ | :---------------- | :---------------------------------------------------------------------------------------------------------------------- |
+| **Pull Requests**   | **Read & Write**  | 读取 PR 变更信息并在 PR 下批量提交行级内联评论与审查结论                                                                |
+| **Contents**        | **Read & Write**  | 浅克隆代码供 `read_file` 和 `grep_code` 读取；关闭已修复发现的讨论（`resolveReviewThread`）要求写权限，App 不会推送代码 |
+| **Metadata**        | **Read-only**     | (默认要求) 检索基础仓库元数据                                                                                           |
+| **Checks**          | **Read-only**     | 读取 head commit 的检查结果与失败注解，作为审查的 CI 上下文                                                             |
+| **Commit statuses** | **Read-only**     | 读取 Jenkins 等外部 CI 写入的提交状态                                                                                   |
+| **Actions**         | **Read-only**     | 下载失败的 GitHub Actions 任务日志，供 Agent 按需读取                                                                   |
 
 缺少后三项权限时审查照常进行，只是没有对应的 CI 上下文。
 
