@@ -245,6 +245,7 @@ export class PRReviewWorker {
         previousFindings,
         openFindings,
         session,
+        sessionTools: true,
         incremental:
           incrementalDiff !== undefined && history.lastReviewedCommit
             ? { sinceCommit: history.lastReviewedCommit, rawDiff: incrementalDiff }

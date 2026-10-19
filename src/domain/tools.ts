@@ -175,6 +175,25 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
   },
 ];
 
+/**
+ * Tools of a PR's ongoing review session (GitHub App): closing earlier findings and answering
+ * replies. One-off reviews (CLI, benchmark) never have either, so they do not carry them.
+ */
+export const SESSION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "resolve_finding",
+  "reply_to_author",
+]);
+
+/**
+ * The tool set of a mode. It is fixed within a mode: tool definitions head every request, so a
+ * set changing between the events of one session would void its whole prompt-cache prefix.
+ */
+export function toolDefinitionsFor(sessionTools: boolean) {
+  return sessionTools
+    ? MAIN_TOOL_DEFINITIONS
+    : MAIN_TOOL_DEFINITIONS.filter((t) => !SESSION_TOOL_NAMES.has(t.function.name));
+}
+
 /** Path prefix under which failed CI job logs are mounted read-only for read_file / grep_code. */
 export const CI_LOGS_MOUNT = "@ci-logs";
 

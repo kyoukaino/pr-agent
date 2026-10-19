@@ -19,6 +19,11 @@ export interface ChatMessage {
   reasoning_content?: string;
   /** Set on the compressed-memory message; internal only, never sent to the API. */
   memory?: CompressedMemory;
+  /**
+   * Set on a user message that continues a session (new commits, an author's reply); kept as a
+   * trail line when the message is compressed. Internal only, never sent to the API.
+   */
+  event?: string;
 }
 
 /** Working memory that replaces compressed history; `content` of its message is rendered from it. */

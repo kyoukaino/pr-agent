@@ -9,6 +9,8 @@ import { parseGitDiff } from "./diff-parser.js";
 import { buildFollowUpMessage } from "./prompt.js";
 import { routeToGroups, type SessionGroup } from "./session.js";
 import { PRSessionStore } from "../github-app/session-store.js";
+import { toolDefinitionsFor } from "./tools.js";
+import { extractActions } from "./compression.js";
 
 const usage = {
   promptTokens: 10,
@@ -163,5 +165,40 @@ describe("answering an author's reply", () => {
     const review = await reviewing.executeSubtask("g", [{ role: "user", content: "review" }]);
     expect(review.replies).toEqual([]);
     expect(review.messages.some((m) => m.content.includes("no author reply to answer"))).toBe(true);
+  });
+});
+
+describe("session-only parts", () => {
+  it("offers resolve_finding and reply_to_author only to session runs", () => {
+    const names = (s: boolean) => toolDefinitionsFor(s).map((t) => t.function.name);
+    expect(names(true)).toEqual(expect.arrayContaining(["resolve_finding", "reply_to_author"]));
+    expect(names(false)).not.toContain("resolve_finding");
+    expect(names(false)).not.toContain("reply_to_author");
+    expect(names(false)).toEqual(
+      expect.arrayContaining(["code_comment", "read_file", "task_done"]),
+    );
+  });
+
+  it("keeps follow-up events in the compressed trail, in order", () => {
+    const followUp = buildFollowUpMessage({
+      commit: "c10201f0000",
+      sinceCommit: "36fb1e40000",
+      diffs: parseGitDiff("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-x\n+y\n")
+        .files,
+      openFindings: [],
+      confirmedComments: [],
+    });
+    const actions = extractActions([
+      { role: "assistant", content: "", tool_calls: [call("read_file", { path: "a.ts" }, "x")] },
+      { role: "tool", tool_call_id: "x", content: "..." },
+      followUp,
+      { role: "assistant", content: "", tool_calls: [call("task_done", {}, "y")] },
+      { role: "tool", tool_call_id: "y", content: "Task completed successfully." },
+    ]);
+    expect(actions).toEqual([
+      '- read_file {"path":"a.ts"}',
+      "- [event] author pushed c10201f (since 36fb1e4): a.ts",
+      "- task_done {}",
+    ]);
   });
 });

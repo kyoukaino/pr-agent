@@ -60,6 +60,11 @@ export interface ReviewPROptions {
   session?: ReviewSession;
   /** Earlier findings still open on the PR; the agent closes the ones the code now fixes. */
   openFindings?: OpenFinding[];
+  /**
+   * Part of a PR's review session (GitHub App): offer resolve_finding and reply_to_author. One-off
+   * reviews (CLI, benchmark) leave it unset and never see those tools.
+   */
+  sessionTools?: boolean;
   systemRule?: string;
   publishToGitHub?: boolean;
   githubToken?: string;
@@ -258,6 +263,7 @@ export class PRAgent {
           changedPaths: prDiff.files.map((f) => f.path),
           maxRounds: this.config.limits.maxRounds,
           openFindingIds: options.openFindings?.map((f) => f.id),
+          sessionTools: options.sessionTools,
           mounts: options.ciLogsDir ? { [CI_LOGS_MOUNT]: options.ciLogsDir } : undefined,
           signal: options.signal,
         });
@@ -466,6 +472,7 @@ export class PRAgent {
       maxRounds: this.config.limits.maxRounds,
       openFindingIds: [options.finding.id],
       answeringReply: true,
+      sessionTools: true,
       signal: options.signal,
     });
 
