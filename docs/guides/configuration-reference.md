@@ -50,26 +50,30 @@ export default defineConfig({
     maxContextTokens: 128_000,
     softWatermark: 0.6,
     warningWatermark: 0.8,
-    maxRounds: 20,
     roundTimeoutMs: 300_000,
     totalTimeoutMs: 1_800_000,
   },
 
-  // 3. 审查策略
+  // 3. 安全上限（不属于预算）
+  limits: {
+    maxRounds: 100,
+  },
+
+  // 4. 审查策略
   review: {
     minSeverityToBlock: "P1",
     maxCommentsPerReview: 30,
     enableAstGrep: true,
   },
 
-  // 4. 自研可观测性接入
+  // 5. 自研可观测性接入
   telemetry: {
     enabled: true,
     serviceName: "pr-agent",
     phoenixEndpoint: "http://localhost:6006/v1/traces",
   },
 
-  // 5. 业务自研审查规范 (动态注入 System Prompt)
+  // 6. 业务自研审查规范 (动态注入 System Prompt)
   rules: [
     "Verify JWT and authentication secrets are not hardcoded or leaked in logs",
     "Ensure all async database and external network calls have timeout handling",
@@ -101,11 +105,16 @@ export default defineConfig({
 | `budget.maxContextTokens` | number | `128000`  | 用于压缩判断的上下文窗口，不限制花费                                                                                                     |
 | `budget.softWatermark`    | number | `0.6`     | 预留：后续非阻塞后台压缩的参考线，当前不触发任何行为                                                                                     |
 | `budget.warningWatermark` | number | `0.8`     | 警戒水位阈值（80%），单轮结束时达到该比例强制触发同步记忆压缩                                                                            |
-| `budget.maxRounds`        | number | `20`      | 单个文件组允许的最大多轮交互轮次                                                                                                         |
 | `budget.roundTimeoutMs`   | number | `300000`  | 单次 LLM 调用的超时（5 分钟），超时按可重试错误处理                                                                                      |
 | `budget.totalTimeoutMs`   | number | `1800000` | 单个 PR 审查的总时长上限（30 分钟），与成本一样按剩余组数分配                                                                            |
 
-### 3.3 审查策略配置 (`review`)
+### 3.3 安全上限 (`limits`)
+
+| 字段               | 类型   | 默认值 | 说明                                                                                                             |
+| :----------------- | :----- | :----- | :--------------------------------------------------------------------------------------------------------------- |
+| `limits.maxRounds` | number | `100`  | 每个文件组的 ReAct 轮次安全上限，防止失控循环；不属于预算，正常审查应由 `task_done` 结束。触发时执行 Grace Round |
+
+### 3.4 审查策略配置 (`review`)
 
 | 字段                          | 类型    | 默认值 | 说明                                                                                 |
 | :---------------------------- | :------ | :----- | :----------------------------------------------------------------------------------- |
@@ -113,7 +122,7 @@ export default defineConfig({
 | `review.maxCommentsPerReview` | number  | `30`   | 单次 Review 的评论数上限，超出部分不提交，并在正文中注明省略数量                     |
 | `review.enableAstGrep`        | boolean | `true` | 预留：`@ast-grep/napi` 结构化代码检索开关，当前尚未接入工具集                        |
 
-### 3.4 遥测与追踪配置 (`telemetry`)
+### 3.5 遥测与追踪配置 (`telemetry`)
 
 | 字段                        | 类型    | 默认值                              | 说明                                      |
 | :-------------------------- | :------ | :---------------------------------- | :---------------------------------------- |
@@ -121,7 +130,7 @@ export default defineConfig({
 | `telemetry.serviceName`     | string  | `"pr-agent"`                        | 链路追踪服务标识名                        |
 | `telemetry.phoenixEndpoint` | string  | `"http://localhost:6006/v1/traces"` | Arize Phoenix OTLP/HTTP 接收端点          |
 
-### 3.5 规则系统配置 (`rules`)
+### 3.6 规则系统配置 (`rules`)
 
 | 字段    | 类型     | 默认值 | 说明                                                                                                       |
 | :------ | :------- | :----- | :--------------------------------------------------------------------------------------------------------- |
@@ -138,7 +147,6 @@ export default defineConfig({
   model: "deepseek-flash",
   budget: {
     maxCostUsd: 0.2,
-    maxRounds: 10,
   },
   review: {
     minSeverityToBlock: "P0", // 仅极严重安全与阻断 Bug 才打回
@@ -155,7 +163,6 @@ export default defineConfig({
   temperature: 0.05,
   budget: {
     maxCostUsd: 3,
-    maxRounds: 25,
   },
   review: {
     minSeverityToBlock: "P1",

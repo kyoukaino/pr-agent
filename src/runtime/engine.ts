@@ -20,6 +20,8 @@ export interface AgentRuntimeOptions {
   resumeState?: ResumeState;
   /** Paths changed by the PR; code_comment is restricted to them. */
   changedPaths?: string[];
+  /** Safety backstop: max ReAct rounds per subtask (default 100). Not part of the budget. */
+  maxRounds?: number;
   /** External cancellation (e.g. a superseded webhook job). */
   signal?: AbortSignal;
   onCommentEmitted?: (comment: EmittedComment) => void;
@@ -45,6 +47,7 @@ export class AgentRuntimeEngine {
   private checkpointStore?: CheckpointStore;
   private traceRecorder?: RunTraceRecorder;
   private changedPaths?: string[];
+  private maxRounds: number;
   private accumulatedComments: EmittedComment[] = [];
   private onCommentCallback?: (comment: EmittedComment) => void;
 
@@ -58,6 +61,7 @@ export class AgentRuntimeEngine {
     this.checkpointStore = options.checkpointStore;
     this.traceRecorder = options.traceRecorder;
     this.changedPaths = options.changedPaths;
+    this.maxRounds = options.maxRounds ?? 100;
     this.onCommentCallback = options.onCommentEmitted;
 
     if (options.signal) {
@@ -136,7 +140,7 @@ export class AgentRuntimeEngine {
     subtaskKey: string,
     initialMessages: ChatMessage[],
     remainingSubtasks = 1,
-    maxRounds = this.budget.maxRounds,
+    maxRounds = this.maxRounds,
   ): Promise<SubtaskResult> {
     this.budget.beginSubtask(remainingSubtasks);
     const costAtStart = this.budget.costUsd;

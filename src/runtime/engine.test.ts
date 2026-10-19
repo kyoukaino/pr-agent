@@ -44,7 +44,8 @@ describe("AgentRuntimeEngine cost budget", () => {
       runId: "test",
       repoDir: os.tmpdir(),
       llmClient: exploringClient(0.3, calls),
-      budgetConfig: { maxCostUsd: 1, maxRounds: 10 },
+      budgetConfig: { maxCostUsd: 1 },
+      maxRounds: 10,
     });
 
     const first = await engine.executeSubtask("g1", task("g1"), 2); // share 0.5
