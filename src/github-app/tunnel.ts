@@ -1,7 +1,5 @@
-import { createAppAuth } from "@octokit/auth-app";
-import { Octokit } from "@octokit/rest";
+import type { Octokit } from "@octokit/rest";
 import pc from "picocolors";
-import type { GitHubAppConfig } from "./config.js";
 
 /**
  * Keeps the App's webhook URL pointed at a Cloudflare Quick Tunnel.
@@ -9,7 +7,8 @@ import type { GitHubAppConfig } from "./config.js";
  * A quick tunnel (`cloudflared tunnel --url …`) gets a new random *.trycloudflare.com hostname on
  * every cloudflared restart. cloudflared reports the current hostname on its metrics server at
  * `/quicktunnel`, so the app reads it and updates its own webhook config whenever it changes.
- * Events delivered while the URL is stale are lost; a named tunnel with a fixed hostname avoids that.
+ * Events sent while the URL was stale fail; they are replayed once the webhook reaches the tunnel
+ * again (see redelivery.ts). A named tunnel with a fixed hostname avoids the gap altogether.
  */
 
 const RECHECK_INTERVAL_MS = 60_000;
@@ -28,32 +27,47 @@ export function webhookUrlFor(hostname: string): string {
   return `https://${hostname}/webhook`;
 }
 
-type AppAuth = ReturnType<typeof createAppAuth>;
-
-/** Updates the App's webhook URL if it differs; returns whether it changed. */
-async function syncOnce(auth: AppAuth, metricsUrl: string): Promise<boolean> {
+/**
+ * Points the App's webhook at the tunnel's current hostname. Returns whether the webhook now
+ * reaches the tunnel (undefined while cloudflared has no hostname yet) and whether it changed.
+ */
+async function syncOnce(
+  appOctokit: Octokit,
+  metricsUrl: string,
+): Promise<{ changed: boolean } | undefined> {
   const hostname = await fetchQuickTunnelHostname(metricsUrl);
-  if (!hostname) return false;
+  if (!hostname) return undefined;
   const url = webhookUrlFor(hostname);
-  // The webhook config endpoints take the App's JWT; auth-app's request hook does not route them
-  // to it, so mint one explicitly (it expires after 10 minutes, hence per sync).
-  const { token } = await auth({ type: "app" });
-  const appOctokit = new Octokit({ auth: token });
   const { data: current } = await appOctokit.rest.apps.getWebhookConfigForApp();
-  if (current.url === url) return false;
+  if (current.url === url) return { changed: false };
   // Pass the body as `data`: a top-level `url` parameter would replace the request URL itself.
   await appOctokit.request("PATCH /app/hook/config", { data: { url, content_type: "json" } });
   console.log(pc.green(`✓ Webhook URL updated to ${url}`));
-  return true;
+  return { changed: true };
 }
 
-/** Starts syncing in the background; the returned function stops it. */
-export function startWebhookTunnelSync(config: GitHubAppConfig, metricsUrl: string): () => void {
-  const auth = createAppAuth({ appId: config.appId, privateKey: config.privateKey });
-  const tick = () =>
-    syncOnce(auth, metricsUrl).catch((err: Error) => {
-      console.error(pc.yellow(`[Tunnel] Webhook URL sync failed: ${err.message}`));
-    });
+/**
+ * Starts syncing in the background; the returned function stops it. `onReachable` runs once the
+ * webhook first points at the tunnel and again after every hostname change, i.e. whenever events
+ * may have been missed.
+ */
+export function startWebhookTunnelSync(
+  getAppOctokit: () => Promise<Octokit>,
+  metricsUrl: string,
+  onReachable?: () => Promise<unknown>,
+): () => void {
+  let reachedOnce = false;
+  const tick = async () => {
+    try {
+      const res = await syncOnce(await getAppOctokit(), metricsUrl);
+      if (res && (res.changed || !reachedOnce)) {
+        reachedOnce = true;
+        await onReachable?.();
+      }
+    } catch (err) {
+      console.error(pc.yellow(`[Tunnel] Webhook URL sync failed: ${(err as Error).message}`));
+    }
+  };
   void tick();
   const timer = setInterval(tick, RECHECK_INTERVAL_MS);
   timer.unref();

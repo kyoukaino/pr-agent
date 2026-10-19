@@ -6,6 +6,7 @@ import { PRReviewWorker } from "./worker.js";
 import { createWebhookServer } from "./server.js";
 import { startWebhookTunnelSync } from "./tunnel.js";
 import { PRSessionStore } from "./session-store.js";
+import { redeliverMissedDeliveries } from "./redelivery.js";
 
 export * from "./config.js";
 export * from "./auth.js";
@@ -17,6 +18,7 @@ export * from "./tunnel.js";
 export * from "./history.js";
 export * from "./threads.js";
 export * from "./session-store.js";
+export * from "./redelivery.js";
 
 /**
  * Boots the unified GitHub App server and BullMQ worker instance for private single-tenant deployment.
@@ -33,8 +35,14 @@ export async function startGitHubApp(): Promise<void> {
   const sessionStore = new PRSessionStore();
   const worker = new PRReviewWorker(config, authManager, queueManager, sessionStore);
   const server = createWebhookServer(config, queueManager, sessionStore);
+  // Replay PR events GitHub failed to deliver while the service was down or the tunnel moved.
+  const redeliver = () =>
+    authManager
+      .getAppOctokit()
+      .then(redeliverMissedDeliveries)
+      .catch((err: Error) => console.error(pc.yellow(`[Redelivery] failed: ${err.message}`)));
   const stopTunnelSync = config.tunnelMetricsUrl
-    ? startWebhookTunnelSync(config, config.tunnelMetricsUrl)
+    ? startWebhookTunnelSync(() => authManager.getAppOctokit(), config.tunnelMetricsUrl, redeliver)
     : undefined;
 
   server.listen(config.port, () => {
@@ -43,6 +51,8 @@ export async function startGitHubApp(): Promise<void> {
     console.log(
       pc.green(`✓ BullMQ Worker active (Concurrency: ${config.rateLimit.maxConcurrentReviews})`),
     );
+    // With a quick tunnel, replay waits until the webhook points at the tunnel again.
+    if (!stopTunnelSync) void redeliver();
   });
 
   const shutdown = async () => {
