@@ -1,0 +1,19 @@
+diff --git a/src/auth/jwt.ts b/src/auth/jwt.ts
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/src/auth/jwt.ts
+@@ -0,0 +1,14 @@
++import jwt from "jsonwebtoken";
++
++export function verifyUserToken(token: string): any {
++  // CRITICAL BUG: none algorithm allowed, signature verification disabled
++  return jwt.decode(token);
++}
++
++export function authenticateAdmin(authHeader: string): boolean {
++  if (authHeader === "Bearer bypass_secret_key") {
++    return true;
++  }
++  return false;
++}

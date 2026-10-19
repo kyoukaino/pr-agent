@@ -1,0 +1,84 @@
+services:
+  # ===================================================
+  # 1. PR-Agent GitHub App & BullMQ Worker
+  # ===================================================
+  pr-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pr-agent-service
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      # Redis Connection (BullMQ Queue)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # GitHub App Credentials
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      # DeepSeek API Configuration
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - PR_AGENT_MODEL=${PR_AGENT_MODEL:-deepseek-flash}
+      # Observability (Arize Phoenix)
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006/v1/traces
+      - PR_AGENT_TELEMETRY=true
+      # Queue Rate Limits
+      - MAX_CONCURRENT_REVIEWS=${MAX_CONCURRENT_REVIEWS:-10}
+      - MAX_REVIEWS_PER_MINUTE=${MAX_REVIEWS_PER_MINUTE:-30}
+    depends_on:
+      redis:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
+    volumes:
+      - pr_agent_sessions:/app/.pr-agent
+    networks:
+      - pr-agent-network
+
+  # ===================================================
+  # 2. Redis 7 (BullMQ Distributed Task Queue & PubSub)
+  # ===================================================
+  redis:
+    image: redis:7-alpine
+    container_name: pr-agent-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --save 60 1
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pr-agent-network
+
+  # ===================================================
+  # 3. Arize Phoenix (LLM Observability & Trace Waterfall)
+  # ===================================================
+  phoenix:
+    image: arize/phoenix:latest
+    container_name: pr-agent-phoenix
+    restart: unless-stopped
+    ports:
+      - "6006:6006"
+    volumes:
+      - phoenix_data:/data
+    networks:
+      - pr-agent-network
+
+volumes:
+  redis_data:
+  pr_agent_sessions:
+  phoenix_data:
+
+networks:
+  pr-agent-network:
+    driver: bridge
