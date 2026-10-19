@@ -96,7 +96,7 @@ Grace Round 在份额用完之后执行，所以一次审查的实际花费可�
 
 ## 4. 容错
 
-- **LLM 重试**（[`src/runtime/retry.ts`](../../src/runtime/retry.ts)）：对 408/409/429/5xx、连接错误和超时做指数退避加全抖动重试，最多 3 次；退避等待可被取消信号打断。
+- **LLM 重试**（[`src/runtime/retry.ts`](../../src/runtime/retry.ts)）：对 408/409/429/5xx、连接错误和超时做指数退避加全抖动重试，最多 5 次（每次等待上限依次为 2、4、8、16、30 秒）；退避等待可被取消信号打断。
 - **工具连续失败熔断**（`ToolFailureStreakTracker`）：同一组内同一工具连续失败 3 次后，后续调用直接返回错误提示，避免浪费轮次；成功调用会重置计数。
 - **取消**（[`src/runtime/cancellation.ts`](../../src/runtime/cancellation.ts)）：`TaskCancellationTree` 基于原生 `AbortController`，父节点取消时级联中止所有子节点。GitHub App 的 worker 为每个任务创建一个根节点，被新提交取代时将其中止；引擎通过 `signal` 接收该信号，并传到 LLM 请求、重试等待和 ripgrep 子进程。
 
