@@ -28,11 +28,17 @@ export function webhookUrlFor(hostname: string): string {
   return `https://${hostname}/webhook`;
 }
 
+type AppAuth = ReturnType<typeof createAppAuth>;
+
 /** Updates the App's webhook URL if it differs; returns whether it changed. */
-async function syncOnce(appOctokit: Octokit, metricsUrl: string): Promise<boolean> {
+async function syncOnce(auth: AppAuth, metricsUrl: string): Promise<boolean> {
   const hostname = await fetchQuickTunnelHostname(metricsUrl);
   if (!hostname) return false;
   const url = webhookUrlFor(hostname);
+  // The webhook config endpoints take the App's JWT; auth-app's request hook does not route them
+  // to it, so mint one explicitly (it expires after 10 minutes, hence per sync).
+  const { token } = await auth({ type: "app" });
+  const appOctokit = new Octokit({ auth: token });
   const { data: current } = await appOctokit.rest.apps.getWebhookConfigForApp();
   if (current.url === url) return false;
   await appOctokit.rest.apps.updateWebhookConfigForApp({ url, content_type: "json" });
@@ -42,12 +48,9 @@ async function syncOnce(appOctokit: Octokit, metricsUrl: string): Promise<boolea
 
 /** Starts syncing in the background; the returned function stops it. */
 export function startWebhookTunnelSync(config: GitHubAppConfig, metricsUrl: string): () => void {
-  const appOctokit = new Octokit({
-    authStrategy: createAppAuth,
-    auth: { appId: config.appId, privateKey: config.privateKey },
-  });
+  const auth = createAppAuth({ appId: config.appId, privateKey: config.privateKey });
   const tick = () =>
-    syncOnce(appOctokit, metricsUrl).catch((err: Error) => {
+    syncOnce(auth, metricsUrl).catch((err: Error) => {
       console.error(pc.yellow(`[Tunnel] Webhook URL sync failed: ${err.message}`));
     });
   void tick();
