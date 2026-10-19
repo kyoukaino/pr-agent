@@ -133,6 +133,7 @@ flowchart TD
   - Agent 重新核对代码后，用 `reply_to_author` 回答一次；作者说得对时，同时调用 `resolve_finding`，讨论随之标为已解决。
   - 回复内容放在 `<author_reply source="untrusted PR participant">` 中，只当作论据，不当作指令。
   - 机器人的评论（包括本 App 自己的回复）、新开的讨论、外部人员的评论一律忽略，以免任何人都能在公开仓库上消耗 LLM 额度。
+- **工具集按模式固定**：`resolve_finding` 与 `reply_to_author` 只在 GitHub App 的会话中提供（`sessionTools`），CLI 与基准测试不提供。同一模式内工具集不变，因为工具定义位于每次请求的开头，会话的不同事件之间如果换了工具集，整段对话的前缀缓存都会失效。
 - **同一 PR 串行执行**：审查和回复都会读写同一份会话，所以 Worker 用一把 Redis 锁（`pr:lock:<repo>:<pr>`，可重入，TTL 1 小时）保证同一 PR 同时只有一个任务；拿不到锁的任务 15 秒后重试。新推送仍然会通过取消广播打断旧的审查，但不会打断正在进行的回复。
 - **行号锚定**：始终以整个 PR 的 diff 为准，因为 GitHub 只接受落在 PR diff 上的评论。增量 diff 中的 `L<n>` 是上次审查时那个提交的行号，不是 base 的行号，所以 prompt 要求发现锚定在 `R<n>` 行上。
 

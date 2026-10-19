@@ -6,7 +6,7 @@ import { ToolFailureStreakTracker } from "./retry.js";
 import { TaskCancellationTree } from "./cancellation.js";
 import { CheckpointStore, type ResumeState } from "./checkpoint.js";
 import { RunTraceRecorder } from "./trace.js";
-import { ToolDispatcher, MAIN_TOOL_DEFINITIONS } from "../domain/tools.js";
+import { ToolDispatcher, toolDefinitionsFor } from "../domain/tools.js";
 import type { EmittedComment } from "../domain/github-types.js";
 import { AgentTelemetry } from "../telemetry/otel.js";
 
@@ -31,6 +31,11 @@ export interface AgentRuntimeOptions {
   openFindingIds?: string[];
   /** Answering an author's reply in a finding thread: enables reply_to_author. */
   answeringReply?: boolean;
+  /**
+   * Offer the session tools (resolve_finding, reply_to_author): set for every run of a PR's review
+   * session (GitHub App), so the tool set, and with it the prompt-cache prefix, never changes.
+   */
+  sessionTools?: boolean;
 }
 
 export interface ResolvedFinding {
@@ -75,6 +80,7 @@ export class AgentRuntimeEngine {
   private maxRounds: number;
   private openFindingIds: Set<string>;
   private answeringReply: boolean;
+  private tools: ReturnType<typeof toolDefinitionsFor>;
   private resolvedIds = new Set<string>();
   private accumulatedComments: EmittedComment[] = [];
   private onCommentCallback?: (comment: EmittedComment) => void;
@@ -93,6 +99,7 @@ export class AgentRuntimeEngine {
     this.maxRounds = options.maxRounds ?? 100;
     this.openFindingIds = new Set(options.openFindingIds ?? []);
     this.answeringReply = options.answeringReply ?? false;
+    this.tools = toolDefinitionsFor(options.sessionTools ?? false);
     this.onCommentCallback = options.onCommentEmitted;
 
     if (options.signal) {
@@ -151,14 +158,9 @@ export class AgentRuntimeEngine {
 
   /** One LLM step bounded by the per-round timeout and the run's cancellation signal. */
   private async callModel(messages: ChatMessage[]): Promise<LLMResponse> {
-    const response = await this.llmClient.chatCompletion(
-      messages,
-      MAIN_TOOL_DEFINITIONS,
-      this.signal,
-      {
-        timeoutMs: this.budget.roundTimeoutMs,
-      },
-    );
+    const response = await this.llmClient.chatCompletion(messages, this.tools, this.signal, {
+      timeoutMs: this.budget.roundTimeoutMs,
+    });
     this.budget.recordUsage(response.usage);
     return response;
   }
@@ -230,6 +232,24 @@ export class AgentRuntimeEngine {
           if (this.budget.isTimedOut()) {
             stopReason = MainLoopStop.StopTimeout;
             break;
+          }
+
+          // Memory compression once the context crosses the watermark. Checked before every model
+          // call, so a continued session whose follow-up pushed it over is compressed first.
+          if (this.budget.shouldCompress(messages)) {
+            const compressed = await this.compressor.compress(messages, {
+              maxContextTokens: this.budget.maxContextWindow,
+              warningThreshold: this.budget.tokenWarningThreshold,
+              signal: this.signal,
+              timeoutMs: this.budget.roundTimeoutMs,
+            });
+            if (compressed.usage) this.budget.recordUsage(compressed.usage);
+            messages = compressed.messages;
+            if (this.budget.shouldCompress(messages)) {
+              // Still exceeds threshold after compression: stop loop safely
+              stopReason = MainLoopStop.StopCompression;
+              break;
+            }
           }
 
           roundsLeft--;
@@ -316,23 +336,6 @@ export class AgentRuntimeEngine {
             stopReason = MainLoopStop.StopNone;
             break;
           }
-
-          // 4. Memory compression once the context crosses the watermark
-          if (this.budget.shouldCompress(messages)) {
-            const compressed = await this.compressor.compress(messages, {
-              maxContextTokens: this.budget.maxContextWindow,
-              warningThreshold: this.budget.tokenWarningThreshold,
-              signal: this.signal,
-              timeoutMs: this.budget.roundTimeoutMs,
-            });
-            if (compressed.usage) this.budget.recordUsage(compressed.usage);
-            messages = compressed.messages;
-            if (this.budget.shouldCompress(messages)) {
-              // Still exceeds threshold after compression: stop loop safely
-              stopReason = MainLoopStop.StopCompression;
-              break;
-            }
-          }
         }
 
         if (roundsLeft === 0 && !completed && stopReason === MainLoopStop.StopNone) {
@@ -395,14 +398,19 @@ export class AgentRuntimeEngine {
     messages: ChatMessage[],
     toolDispatcher: ToolDispatcher,
   ): Promise<boolean> {
+    const offered = new Set(this.tools.map((t) => t.function.name));
+    const graceTools = [...GRACE_ROUND_TOOLS].filter((t) => offered.has(t));
     messages.push({
       role: "user",
-      content:
-        "Your review budget is exhausted. This is your FINAL grace round. You may ONLY call 'code_comment' to report findings, 'resolve_finding' for verified fixes, 'reply_to_author' if you were asked to answer a reply, or 'task_done' if finished. No other tools are available.",
+      content: `Your review budget is exhausted. This is your FINAL grace round. You may ONLY call ${graceTools
+        .map((t) => `'${t}'`)
+        .join(
+          ", ",
+        )}: record the findings, fixes or answer you have verified, then finish. No other tools are available.`,
     });
 
     try {
-      // Keep MAIN_TOOL_DEFINITIONS intact to preserve LLM KV prefix cache (avoid busting DeepSeek Prompt Cache).
+      // Keep the tool definitions intact to preserve LLM KV prefix cache (avoid busting DeepSeek Prompt Cache).
       // Tool usage restriction is enforced via prompt instruction and runtime execution filter.
       const startedAt = new Date();
       const response = await this.callModel(messages);
@@ -420,12 +428,12 @@ export class AgentRuntimeEngine {
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
       });
       for (const tc of toolCalls) {
-        if (!GRACE_ROUND_TOOLS.has(tc.function.name)) {
+        if (!graceTools.includes(tc.function.name)) {
           // Guard: ignore exploratory tools in grace round without busting tool schema cache
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: `Skipped: only ${[...GRACE_ROUND_TOOLS].join(", ")} run in the grace round.`,
+            content: `Skipped: only ${graceTools.join(", ")} run in the grace round.`,
           });
           continue;
         }

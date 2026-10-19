@@ -160,6 +160,7 @@ export function extractActions(messages: ChatMessage[]): string[] {
   }
   const actions: string[] = [];
   for (const m of messages) {
+    if (m.role === "user" && m.event) actions.push(`- [event] ${m.event}`);
     for (const tc of m.tool_calls ?? []) {
       const result = results.get(tc.id) ?? "";
       let args: Record<string, unknown> | null = null;
