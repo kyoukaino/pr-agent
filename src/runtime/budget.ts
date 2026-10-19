@@ -43,7 +43,6 @@ export interface BudgetConfig {
   softWatermark?: number;
   /** Fraction of the context window that triggers memory compression (default: 0.8). */
   warningWatermark?: number;
-  maxRounds?: number; // Max ReAct rounds per subtask (default: 20)
   roundTimeoutMs?: number; // Per-LLM-call timeout (default: 5 min; reasoning models can think for minutes)
   totalTimeoutMs?: number; // Wall-clock limit for the whole review (default: 30 min)
 }
@@ -69,7 +68,6 @@ export class ExecutionBudgetController {
   private startTime: number;
   private maxCostUsd: number;
   private maxContextTokens: number;
-  public readonly maxRounds: number;
   public readonly roundTimeoutMs: number;
   private totalTimeoutMs: number;
   public readonly tokenSoftThreshold: number; // -> reserved: async compression
@@ -83,7 +81,6 @@ export class ExecutionBudgetController {
     this.maxContextTokens = config.maxContextTokens ?? 128_000;
     this.tokenSoftThreshold = config.softWatermark ?? 0.6;
     this.tokenWarningThreshold = config.warningWatermark ?? 0.8;
-    this.maxRounds = config.maxRounds ?? 20;
     this.roundTimeoutMs = config.roundTimeoutMs ?? 300_000;
     this.totalTimeoutMs = config.totalTimeoutMs ?? 1_800_000;
     this.startTime = Date.now();

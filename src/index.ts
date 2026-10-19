@@ -163,7 +163,6 @@ export class PRAgent {
           softWatermark: options.budgetConfig?.softWatermark || this.config.budget.softWatermark,
           warningWatermark:
             options.budgetConfig?.warningWatermark || this.config.budget.warningWatermark,
-          maxRounds: options.budgetConfig?.maxRounds || this.config.budget.maxRounds,
           roundTimeoutMs: options.budgetConfig?.roundTimeoutMs || this.config.budget.roundTimeoutMs,
           totalTimeoutMs: options.budgetConfig?.totalTimeoutMs || this.config.budget.totalTimeoutMs,
         };
@@ -178,6 +177,7 @@ export class PRAgent {
           traceRecorder,
           resumeState: resumeState || undefined,
           changedPaths: prDiff.files.map((f) => f.path),
+          maxRounds: this.config.limits.maxRounds,
           signal: options.signal,
         });
 

@@ -7,9 +7,14 @@ export const BudgetConfigSchema = z.object({
   maxContextTokens: z.coerce.number().positive().default(128_000),
   softWatermark: z.number().min(0).max(1).default(0.6),
   warningWatermark: z.number().min(0).max(1).default(0.8),
-  maxRounds: z.coerce.number().int().positive().default(20),
   roundTimeoutMs: z.coerce.number().positive().default(300_000),
   totalTimeoutMs: z.coerce.number().positive().default(1_800_000),
+});
+
+/** Safety limits: backstops against runaway loops, not spending controls. */
+export const LimitsConfigSchema = z.object({
+  /** Max ReAct rounds per file group before a forced Grace Round. */
+  maxRounds: z.coerce.number().int().positive().default(100),
 });
 
 export const TelemetryConfigSchema = z.object({
@@ -30,6 +35,7 @@ export const PRAgentConfigSchema = z.object({
   baseURL: z.string().url().default("https://api.deepseek.com"),
   temperature: z.coerce.number().min(0).max(2).default(0.1),
   budget: BudgetConfigSchema.default({}),
+  limits: LimitsConfigSchema.default({}),
   telemetry: TelemetryConfigSchema.default({}),
   review: ReviewPolicySchema.default({}),
   rules: z.array(z.string()).default([]),

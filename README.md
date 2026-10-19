@@ -21,7 +21,7 @@ PR-Agent 使用自研的轻量 Agent Runtime 驱动 ReAct 式审查循环，支�
 ## 特性
 
 - **兼容 GitHub Review API**：输出结构与 `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` 一致，包含 `commit_id`、`event`（`APPROVE` / `REQUEST_CHANGES` / `COMMENT`）、汇总正文与行内评论。行号会对照 Diff 校验：靠近修改块的评论吸附到块边缘，离得太远的写进 Review 正文，避免整个 Review 因 HTTP 422 被拒绝。
-- **自研 Agent Runtime**：ReAct 调度循环；按 DeepSeek 价格与缓存命中计算的成本预算（默认每个 PR 1 美元），按文件组公平分配；三区上下文压缩（Frozen / Compress / Active），保留工具调用轨迹与已提交评论；预算或轮次用尽时的 Grace Round；指数退避重试与工具连续失败熔断。
+- **自研 Agent Runtime**：ReAct 调度循环；按 DeepSeek 价格与缓存命中计算的成本预算（默认每个 PR 1 美元），按文件组公平分配；三区上下文压缩（Frozen / Compress / Active），保留工具调用轨迹与已提交评论；预算用尽或触发轮次安全上限时的 Grace Round；指数退避重试与工具连续失败熔断。
 - **断点续跑**：会话以 JSONL 形式写入 `.pr-agent/sessions/`，可通过 `--resume <runId>` 恢复中断的审查。
 - **GitHub App 服务**：Webhook HMAC 校验后立即返回 202，审查任务经 Redis + BullMQ 排队限流；同一 PR 推送新提交时自动取消旧任务。
 - **可观测性**：基于 OpenInference 语义约定上报 OTLP 链路到 [Arize Phoenix](https://github.com/Arize-ai/phoenix)；也可用 `pr-agent view` 打开本地 SQLite 看板。
@@ -116,8 +116,10 @@ export default defineConfig({
   temperature: 0.1,
   budget: {
     maxCostUsd: 1, // 每个 PR 的花费上限（美元）
-    maxRounds: 20, // 每个文件组的最大轮次
     totalTimeoutMs: 1_800_000,
+  },
+  limits: {
+    maxRounds: 100, // 每个文件组的轮次安全上限，不属于预算
   },
   review: {
     minSeverityToBlock: "P1", // P0 / P1 问题会触发 REQUEST_CHANGES
