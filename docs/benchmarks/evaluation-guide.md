@@ -38,13 +38,16 @@ flowchart TD
 - **真实代码上下文**：默认 `--repo-mode checkout` 会检出 PR 的 head 版本，Agent 的 `read_file` / `grep_code` 读取的就是被审查的代码。`diff-only` 模式给出一个空目录，只用 Diff 审查。
 - **Diff 来源**：始终使用 GitHub 的三点 Diff（merge-base...head），也就是 PR 本身的改动。
 - **阶段解耦**：审查结果落盘后，可以只重跑评分阶段，例如更换 Judge 模型时不必重新审查。
-- **续跑**：复用同一个 `--run-id` 时，已成功的审查和已完成的评分会被跳过；`--force` 强制重做。
+- **续跑**：复用同一个 `--run-id` 时，已成功的审查和已完成的评分会被跳过，未成功的实例重新执行；`--force` 强制重做。`run.json` 保留首次运行的版本与配置，每次续跑追加到 `resumes`。
 
 ## 3. 可复现性与口径
 
 - **配置**：每个实例都用 Schema 默认值加命令行参数（`--review-model`、`--max-cost`）构造 Agent，**不读取**仓库里的 `pr-agent.config.ts`，以免项目自定义规则影响分数。实际生效的完整配置（不含 API Key）写入 `run.json` 的 `agentConfig`。
 - **代码版本**：`run.json` 记录 `git.commit`，以及 `src/`、`bench/` 是否有未提交修改（`git.dirty`）。有未提交修改时运行会给出警告，此时的分数无法对应到具体的代码版本。
-- **失败实例计入分母**：审查失败的实例按"没有任何评论"计分，它的参考评论全部计为漏报，失败列表记录在 `failedReviewIds`。这样不会因为剔除失败的困难样本而高估分数。评分阶段要求所选实例都已有审查结果，否则直接报错。
+- **两类失败分开处理**：
+  - **Agent 失败（`error`）计入分母**：实例已准备好，但审查过程中出错（例如 LLM 调用重试后仍失败）。按"没有任何评论"计分，参考评论全部计为漏报，记录在 `failedReviewIds`，避免剔除困难样本而高估分数。
+  - **无法准备（`unavailable`）不计入**：获取 PR 信息、Diff 或检出代码失败，属于数据或环境问题，与 Agent 能力无关。GitHub API 的 5xx、限流和网络错误会先退避重试（最多 4 次），git fetch 的网络错误也会重试；仓库改名或迁移时自动跟随跳转。仍然失败的实例（最常见的是数据集记录的 head commit 已被强推覆盖并被 GitHub 回收，上游和贡献者 fork 中都取不到）不进入任何分母，与原因一起列在 `unavailableInstances`。续跑同一个 run-id 时会再尝试一次。
+  - 评分阶段要求所选实例都已有审查记录，否则直接报错。
 - **截断情况**：每个文件组的停止原因都会记录下来（见[运行时架构](../architecture/runtime-architecture.md#停止原因mainloopstop)），并汇总到 `review.groupStopReasons`。除 `none` 以外的停止原因越多，说明预算、轮次或错误对结果的影响越大。
 - **Judge 偏差**：审查模型与 Judge 模型相同时会给出警告。默认组合是审查用 `deepseek-flash`、Judge 用 `deepseek-v4-pro`。
 
@@ -88,7 +91,8 @@ eval_<judge>/metrics.json    # 汇总指标
 | 字段                                 | 含义                                                                     |
 | :----------------------------------- | :----------------------------------------------------------------------- |
 | `scores`                             | Precision / Recall / Balanced Score（或 Martian 各 profile 的 tp/fp/fn） |
-| `failedReviewIds`                    | 审查失败、按零评论计分的实例                                             |
+| `failedReviewIds`                    | Agent 审查失败、按零评论计分的实例                                       |
+| `unavailableInstances`               | 无法准备、不参与计分的实例及原因                                         |
 | `judgeCalls` / `judgeCallFailures`   | Judge 调用次数与最终失败次数                                             |
 | `review.avgDurationSec`              | 平均每个 PR 的审查耗时                                                   |
 | `review.totalCostUsd` / `avgCostUsd` | 审查总花费与平均每个 PR 的花费                                           |

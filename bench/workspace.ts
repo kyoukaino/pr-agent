@@ -70,6 +70,23 @@ async function hasCommit(dir: string, sha: string): Promise<boolean> {
   }
 }
 
+// The object is gone from the server (e.g. a force-pushed PR head that GitHub garbage-collected).
+const PERMANENT_FETCH_ERROR = /not our ref|couldn't find remote ref|repository not found/i;
+
+/** Network hiccups are retried; a missing object fails at once since retrying cannot bring it back. */
+async function fetchWithRetry(repoDir: string, ref: string, attempts = 3): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await git(repoDir, ["fetch", "--quiet", "--depth", "1", "--no-tags", "origin", ref]);
+      return;
+    } catch (err) {
+      const message = (err as Error).message;
+      if (attempt >= attempts || PERMANENT_FETCH_ERROR.test(message)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+}
+
 /** Shallow-fetches `ref` (a commit sha or refs/pull/N/head) and checks it out into a throwaway worktree. */
 async function checkoutWorktree(repo: string, ref: string, sha: string, instanceId: string) {
   const repoDir = await ensureRepo(repo);
@@ -77,7 +94,7 @@ async function checkoutWorktree(repo: string, ref: string, sha: string, instance
 
   await withRepoLock(repo, async () => {
     if (!(await hasCommit(repoDir, sha))) {
-      await git(repoDir, ["fetch", "--quiet", "--depth", "1", "--no-tags", "origin", ref]);
+      await fetchWithRetry(repoDir, ref);
     }
     if (fs.existsSync(workDir)) {
       await git(repoDir, ["worktree", "remove", "--force", workDir]).catch(() => undefined);

@@ -41,7 +41,12 @@ export interface GeneratedComment {
 /** Persisted per-instance output of the review stage. */
 export interface ReviewRecord {
   instanceId: string;
-  status: "ok" | "error";
+  /**
+   * ok: reviewed. error: the agent failed during the review; scored as a review with no comments.
+   * unavailable: the instance could not be prepared (dataset commits gone from GitHub, persistent
+   * GitHub / git failures after retries); excluded from scoring and listed in metrics.json.
+   */
+  status: "ok" | "error" | "unavailable";
   error?: string;
   baseCommit?: string;
   headCommit?: string;
