@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# A newer push to the same branch or PR makes the running check obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
