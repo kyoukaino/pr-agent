@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+.vitest/
+
+# Secrets
+.env
+
+# Local runtime state (sessions, traces, dashboard database)
+.pr-agent/
+
+# Benchmark downloads, checkouts and run outputs
+bench/.cache/
+bench/results/
+
+# Generated diagram workspaces
+.archify/
+
+# Ad-hoc diffs; the bundled example is tracked
+*.diff
+!sample.diff

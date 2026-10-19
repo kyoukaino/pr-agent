@@ -1,0 +1,79 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { ChatMessage, ToolCall, ToolResult } from "./types.js";
+import type { TokenUsage } from "../llm/pricing.js";
+
+export interface TraceTurn {
+  turnNumber: number;
+  subtaskKey: string;
+  /** Wall-clock start of the turn (ISO). */
+  startedAt?: string;
+  requestMessages: ChatMessage[];
+  responseContent: string;
+  reasoningContent?: string;
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResult[];
+  usage: TokenUsage;
+  /** Duration of the LLM call; tool durations are on each toolResults entry. */
+  durationMs: number;
+}
+
+export interface RunTraceManifest {
+  runId: string;
+  repo: string;
+  commitId: string;
+  startTime: string;
+  endTime?: string;
+  model: string;
+  turns: TraceTurn[];
+  finalCommentsCount: number;
+  totalTokensUsed: number;
+  costUsd: number;
+}
+
+export class RunTraceRecorder {
+  private manifest: RunTraceManifest;
+  private traceDir: string;
+
+  constructor(
+    runId: string,
+    repo: string,
+    commitId: string,
+    model: string,
+    traceDir = ".pr-agent/traces",
+  ) {
+    this.traceDir = traceDir;
+    if (!fs.existsSync(this.traceDir)) {
+      fs.mkdirSync(this.traceDir, { recursive: true });
+    }
+    this.manifest = {
+      runId,
+      repo,
+      commitId,
+      startTime: new Date().toISOString(),
+      model,
+      turns: [],
+      finalCommentsCount: 0,
+      totalTokensUsed: 0,
+      costUsd: 0,
+    };
+  }
+
+  public get manifestSnapshot(): RunTraceManifest {
+    return this.manifest;
+  }
+
+  public recordTurn(turn: TraceTurn): void {
+    this.manifest.turns.push(turn);
+    this.manifest.totalTokensUsed += turn.usage.totalTokens;
+    this.manifest.costUsd += turn.usage.costUsd;
+  }
+
+  public finalize(commentsCount: number): string {
+    this.manifest.endTime = new Date().toISOString();
+    this.manifest.finalCommentsCount = commentsCount;
+    const filePath = path.join(this.traceDir, `trace-${this.manifest.runId}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(this.manifest, null, 2), "utf-8");
+    return filePath;
+  }
+}
