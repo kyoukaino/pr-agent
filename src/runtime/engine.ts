@@ -20,6 +20,8 @@ export interface AgentRuntimeOptions {
   resumeState?: ResumeState;
   /** Paths changed by the PR; code_comment is restricted to them. */
   changedPaths?: string[];
+  /** Read-only directories exposed to read_file / grep_code under a path prefix (e.g. CI logs). */
+  mounts?: Record<string, string>;
   /** Safety backstop: max ReAct rounds per subtask (default 100). Not part of the budget. */
   maxRounds?: number;
   /** External cancellation (e.g. a superseded webhook job). */
@@ -47,6 +49,7 @@ export class AgentRuntimeEngine {
   private checkpointStore?: CheckpointStore;
   private traceRecorder?: RunTraceRecorder;
   private changedPaths?: string[];
+  private mounts?: Record<string, string>;
   private maxRounds: number;
   private accumulatedComments: EmittedComment[] = [];
   private onCommentCallback?: (comment: EmittedComment) => void;
@@ -61,6 +64,7 @@ export class AgentRuntimeEngine {
     this.checkpointStore = options.checkpointStore;
     this.traceRecorder = options.traceRecorder;
     this.changedPaths = options.changedPaths;
+    this.mounts = options.mounts;
     this.maxRounds = options.maxRounds ?? 100;
     this.onCommentCallback = options.onCommentEmitted;
 
@@ -158,6 +162,7 @@ export class AgentRuntimeEngine {
       const toolDispatcher = new ToolDispatcher({
         repoDir: this.repoDir,
         changedPaths: this.changedPaths,
+        mounts: this.mounts,
         signal: this.signal,
         onCommentEmitted: (comment) => {
           subtaskComments.push(comment);

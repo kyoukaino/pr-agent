@@ -3,6 +3,7 @@ import { isGeneratedOrLockfile, parseGitDiff } from "./domain/diff-parser.js";
 import { groupTokenBudget, partitionFileGroups } from "./domain/grouping.js";
 import { DiffAnchorRelocator } from "./domain/relocator.js";
 import { buildMainTaskMessages } from "./domain/prompt.js";
+import { CI_LOGS_MOUNT } from "./domain/tools.js";
 import { ReviewPayloadAssembler } from "./domain/assembler.js";
 import { DeepSeekLLMClient } from "./llm/client.js";
 import { AgentRuntimeEngine } from "./runtime/engine.js";
@@ -28,6 +29,10 @@ export interface ReviewPROptions {
   rawDiff: string;
   repoDir?: string;
   background?: string;
+  /** Structured CI summary for the head commit (untrusted; rendered in a tagged prompt section). */
+  ciResults?: string;
+  /** Directory of failed CI job logs, readable by the agent under CI_LOGS_MOUNT. */
+  ciLogsDir?: string;
   systemRule?: string;
   publishToGitHub?: boolean;
   githubToken?: string;
@@ -181,6 +186,7 @@ export class PRAgent {
           resumeState: resumeState || undefined,
           changedPaths: prDiff.files.map((f) => f.path),
           maxRounds: this.config.limits.maxRounds,
+          mounts: options.ciLogsDir ? { [CI_LOGS_MOUNT]: options.ciLogsDir } : undefined,
           signal: options.signal,
         });
 
@@ -206,6 +212,7 @@ export class PRAgent {
             groupDiffs: group.files,
             allChangedPaths,
             background: options.background,
+            ciResults: options.ciResults,
             confirmedComments: allComments,
             systemRule: combinedRules.length > 0 ? combinedRules : undefined,
           });
