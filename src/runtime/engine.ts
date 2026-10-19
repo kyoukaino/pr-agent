@@ -27,6 +27,13 @@ export interface AgentRuntimeOptions {
   /** External cancellation (e.g. a superseded webhook job). */
   signal?: AbortSignal;
   onCommentEmitted?: (comment: EmittedComment) => void;
+  /** Ids of findings posted by earlier reviews that resolve_finding may close. */
+  openFindingIds?: string[];
+}
+
+export interface ResolvedFinding {
+  id: string;
+  reason: string;
 }
 
 export interface SubtaskResult {
@@ -35,8 +42,14 @@ export interface SubtaskResult {
   /** Spend of this subtask alone, in USD. */
   costUsd: number;
   comments: EmittedComment[];
+  /** Earlier findings the agent verified as fixed. */
+  resolved: ResolvedFinding[];
+  /** The conversation as it ended; a later follow-up continues from it. */
+  messages: ChatMessage[];
   error?: string;
 }
+
+const GRACE_ROUND_TOOLS = new Set(["code_comment", "resolve_finding", "task_done"]);
 
 export class AgentRuntimeEngine {
   public readonly runId: string;
@@ -51,6 +64,8 @@ export class AgentRuntimeEngine {
   private changedPaths?: string[];
   private mounts?: Record<string, string>;
   private maxRounds: number;
+  private openFindingIds: Set<string>;
+  private resolvedIds = new Set<string>();
   private accumulatedComments: EmittedComment[] = [];
   private onCommentCallback?: (comment: EmittedComment) => void;
 
@@ -66,6 +81,7 @@ export class AgentRuntimeEngine {
     this.changedPaths = options.changedPaths;
     this.mounts = options.mounts;
     this.maxRounds = options.maxRounds ?? 100;
+    this.openFindingIds = new Set(options.openFindingIds ?? []);
     this.onCommentCallback = options.onCommentEmitted;
 
     if (options.signal) {
@@ -158,6 +174,7 @@ export class AgentRuntimeEngine {
       let error: string | undefined;
 
       const subtaskComments: EmittedComment[] = [];
+      const subtaskResolved: ResolvedFinding[] = [];
 
       const toolDispatcher = new ToolDispatcher({
         repoDir: this.repoDir,
@@ -171,6 +188,15 @@ export class AgentRuntimeEngine {
           this.checkpointStore?.appendEvent(this.runId, "COMMENT_EMITTED", {
             subtaskKey,
             comment,
+          });
+        },
+        openFindingIds: this.openFindingIds,
+        resolvedFindingIds: this.resolvedIds,
+        onFindingResolved: (resolved) => {
+          subtaskResolved.push(resolved);
+          this.checkpointStore?.appendEvent(this.runId, "FINDING_RESOLVED", {
+            subtaskKey,
+            ...resolved,
           });
         },
       });
@@ -339,6 +365,8 @@ export class AgentRuntimeEngine {
         stopReason,
         costUsd: this.budget.costUsd - costAtStart,
         comments: subtaskComments,
+        resolved: subtaskResolved,
+        messages,
         error,
       };
     });
@@ -356,7 +384,7 @@ export class AgentRuntimeEngine {
     messages.push({
       role: "user",
       content:
-        "Your review budget is exhausted. This is your FINAL grace round. You may ONLY call 'code_comment' to report findings or call 'task_done' if finished. No other tools are available.",
+        "Your review budget is exhausted. This is your FINAL grace round. You may ONLY call 'code_comment' to report findings, 'resolve_finding' for verified fixes, or 'task_done' if finished. No other tools are available.",
     });
 
     try {
@@ -368,12 +396,29 @@ export class AgentRuntimeEngine {
 
       let isCompleted = false;
       const toolResults: ToolResult[] = [];
-      for (const tc of response.toolCalls || []) {
-        if (tc.function.name !== "code_comment" && tc.function.name !== "task_done") {
-          continue; // Guard: ignore exploratory tools in grace round without busting tool schema cache
+      const toolCalls = response.toolCalls || [];
+      // The turn stays in the conversation so a later follow-up continues from a well-formed history:
+      // every tool call gets a result, skipped ones included.
+      messages.push({
+        role: "assistant",
+        content: response.content,
+        reasoning_content: response.reasoningContent,
+        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      });
+      for (const tc of toolCalls) {
+        if (!GRACE_ROUND_TOOLS.has(tc.function.name)) {
+          // Guard: ignore exploratory tools in grace round without busting tool schema cache
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content:
+              "Skipped: only code_comment, resolve_finding and task_done run in the grace round.",
+          });
+          continue;
         }
         const toolStartedAt = Date.now();
         const res = await toolDispatcher.execute(tc.function.name, tc.function.arguments);
+        messages.push({ role: "tool", tool_call_id: tc.id, content: res.result });
         toolResults.push({
           toolCallId: tc.id,
           toolName: tc.function.name,

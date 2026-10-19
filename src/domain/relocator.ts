@@ -5,6 +5,20 @@ import type { ParsedPRDiff, ParsedFileDiff, DiffHunkRange } from "./diff-parser.
 const CLAMP_DISTANCE = 15;
 
 /**
+ * Invisible tag carrying the finding id in a posted comment, so later reviews can tell which
+ * GitHub thread holds which finding (to resolve it once fixed).
+ */
+export function findingMarker(id: string): string {
+  return `<!-- pr-agent:finding=${id} -->`;
+}
+
+const FINDING_MARKER = /<!-- pr-agent:finding=([\w-]+) -->/;
+
+export function parseFindingMarker(body: string): string | undefined {
+  return FINDING_MARKER.exec(body)?.[1];
+}
+
+/**
  * Result of anchoring one finding. `inline` comments go into the review's `comments` array; findings
  * that cannot be anchored to a diff line are returned as `unanchored` and belong in the review body,
  * because POST /pulls/{n}/reviews rejects (HTTP 422) any comment without a valid line in the diff,
@@ -107,6 +121,6 @@ export class DiffAnchorRelocator {
     if (includeSuggestion && comment.suggested_code) {
       body += `\n\n\`\`\`suggestion\n${comment.suggested_code}\n\`\`\``;
     }
-    return body;
+    return `${body}\n\n${findingMarker(comment.id)}`;
   }
 }

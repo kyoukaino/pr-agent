@@ -2,12 +2,19 @@ import { Octokit } from "@octokit/rest";
 import { isGeneratedOrLockfile, parseGitDiff } from "./domain/diff-parser.js";
 import { groupTokenBudget, partitionFileGroups } from "./domain/grouping.js";
 import { DiffAnchorRelocator } from "./domain/relocator.js";
-import { buildMainTaskMessages, type PriorFinding } from "./domain/prompt.js";
+import { buildFollowUpMessage, buildMainTaskMessages, type PriorFinding } from "./domain/prompt.js";
+import {
+  routeToGroups,
+  type OpenFinding,
+  type ReviewSession,
+  type SessionGroup,
+} from "./domain/session.js";
+import type { ParsedFileDiff } from "./domain/diff-parser.js";
 import { CI_LOGS_MOUNT } from "./domain/tools.js";
 import { ReviewPayloadAssembler } from "./domain/assembler.js";
 import { DeepSeekLLMClient } from "./llm/client.js";
-import { AgentRuntimeEngine } from "./runtime/engine.js";
-import type { MainLoopStop } from "./runtime/types.js";
+import { AgentRuntimeEngine, type ResolvedFinding } from "./runtime/engine.js";
+import type { ChatMessage, MainLoopStop } from "./runtime/types.js";
 import { CheckpointStore } from "./runtime/checkpoint.js";
 import { RunTraceRecorder } from "./runtime/trace.js";
 import { initTelemetry, AgentTelemetry } from "./telemetry/otel.js";
@@ -40,6 +47,13 @@ export interface ReviewPROptions {
    * commit) is reviewed. The full PR diff in `rawDiff` above still anchors the comments.
    */
   incremental?: { sinceCommit: string; rawDiff: string };
+  /**
+   * Conversations of the review at `incremental.sinceCommit`: the new changes are appended to them
+   * instead of starting new ones. Ignored without `incremental`.
+   */
+  session?: ReviewSession;
+  /** Earlier findings still open on the PR; the agent closes the ones the code now fixes. */
+  openFindings?: OpenFinding[];
   systemRule?: string;
   publishToGitHub?: boolean;
   githubToken?: string;
@@ -78,6 +92,10 @@ export interface ReviewRunResult {
   skippedFiles: SkippedFile[];
   /** Groups reviewed in this run (groups already completed before a resume are not repeated). */
   groups: GroupOutcome[];
+  /** Open findings the agent verified as fixed. */
+  resolvedFindings: ResolvedFinding[];
+  /** Conversations as they ended, to continue on the next push. */
+  session: ReviewSession;
 }
 
 export class PRAgent {
@@ -204,6 +222,7 @@ export class PRAgent {
           resumeState: resumeState || undefined,
           changedPaths: prDiff.files.map((f) => f.path),
           maxRounds: this.config.limits.maxRounds,
+          openFindingIds: options.openFindings?.map((f) => f.id),
           mounts: options.ciLogsDir ? { [CI_LOGS_MOUNT]: options.ciLogsDir } : undefined,
           signal: options.signal,
         });
@@ -219,39 +238,80 @@ export class PRAgent {
           ...(options.systemRule ? [options.systemRule] : []),
         ].join("\n");
 
-        // 8. Dispatch per-group subtasks (already completed ones are skipped on resume)
-        const pendingGroups = fileGroups.filter(
-          (g) => !resumeState?.completedSubtasks.has(g.label),
-        );
-        const groups: GroupOutcome[] = [];
-        for (const [i, group] of pendingGroups.entries()) {
-          const initialMessages = buildMainTaskMessages({
-            groupLabel: group.label,
-            groupDiffs: group.files,
-            allChangedPaths,
-            background: options.background,
-            ciResults: options.ciResults,
-            confirmedComments: allComments,
-            previousFindings: options.previousFindings,
-            reviewScope,
-            systemRule: combinedRules.length > 0 ? combinedRules : undefined,
-          });
+        // 8. Dispatch per-group subtasks. A continued session appends the new changes to the
+        // conversations that reviewed those files; otherwise every group starts a conversation
+        // (groups already completed before a resume are skipped).
+        const continued = options.incremental ? options.session : undefined;
+        const sessionGroups: SessionGroup[] = continued ? [...continued.groups] : [];
+        const tasks: { index: number; files: ParsedFileDiff[] }[] = [];
+        if (continued) {
+          for (const [index, files] of routeToGroups(sessionGroups, validDiffs)) {
+            tasks.push({ index, files });
+          }
+        } else {
+          for (const group of fileGroups) {
+            if (resumeState?.completedSubtasks.has(group.label)) continue;
+            sessionGroups.push({
+              label: group.label,
+              paths: group.files.map((f) => f.path),
+              messages: [],
+            });
+            tasks.push({ index: sessionGroups.length - 1, files: group.files });
+          }
+        }
 
-          const res = await engine.executeSubtask(
-            group.label,
-            initialMessages,
-            pendingGroups.length - i,
-          );
+        const groups: GroupOutcome[] = [];
+        const resolvedFindings: ResolvedFinding[] = [];
+        for (const [i, task] of tasks.entries()) {
+          const group = sessionGroups[task.index];
+          const messages: ChatMessage[] = continued
+            ? [
+                ...group.messages,
+                buildFollowUpMessage({
+                  commit: options.commit_id,
+                  sinceCommit: continued.reviewedCommit,
+                  diffs: task.files,
+                  ciResults: options.ciResults,
+                  openFindings: options.openFindings ?? [],
+                  confirmedComments: allComments,
+                }),
+              ]
+            : buildMainTaskMessages({
+                groupLabel: group.label,
+                groupDiffs: task.files,
+                allChangedPaths,
+                background: options.background,
+                ciResults: options.ciResults,
+                confirmedComments: allComments,
+                previousFindings: options.previousFindings,
+                openFindings: options.openFindings,
+                reviewScope,
+                systemRule: combinedRules.length > 0 ? combinedRules : undefined,
+              });
+
+          const res = await engine.executeSubtask(group.label, messages, tasks.length - i);
           allComments.push(...res.comments);
+          resolvedFindings.push(...res.resolved);
+          sessionGroups[task.index] = {
+            label: group.label,
+            paths: [...new Set([...group.paths, ...task.files.map((f) => f.path)])],
+            messages: res.messages,
+          };
           groups.push({
             group: group.label,
-            files: group.files.length,
+            files: task.files.length,
             completed: res.completed,
             stopReason: res.stopReason,
             costUsd: res.costUsd,
             ...(res.error ? { error: res.error } : {}),
           });
         }
+        const session: ReviewSession = {
+          version: 1,
+          model: this.llmClient.model,
+          reviewedCommit: options.commit_id,
+          groups: sessionGroups,
+        };
 
         // 9. Assemble final GitHub Create Review Payload
         const reviewPayload = ReviewPayloadAssembler.assemble({
@@ -343,6 +403,8 @@ export class PRAgent {
           durationMs,
           skippedFiles,
           groups,
+          resolvedFindings,
+          session,
         };
       });
     } catch (err) {
@@ -357,6 +419,7 @@ export class PRAgent {
 export * from "./config/index.js";
 export * from "./domain/github-types.js";
 export type { PriorFinding } from "./domain/prompt.js";
+export * from "./domain/session.js";
 export * from "./domain/diff-parser.js";
 export * from "./domain/relocator.js";
 export * from "./domain/grouping.js";

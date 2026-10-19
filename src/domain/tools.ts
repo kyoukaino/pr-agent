@@ -119,6 +119,28 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
   {
     type: "function",
     function: {
+      name: "resolve_finding",
+      description:
+        "Closes one of the findings listed under <open_findings> because the current code fixes it. Verify the fix in the code first; never use it for findings you merely disagree with now.",
+      parameters: {
+        type: "object",
+        required: ["id", "reason"],
+        properties: {
+          id: {
+            type: "string",
+            description: "Id of the open finding, exactly as listed.",
+          },
+          reason: {
+            type: "string",
+            description: "One sentence on how the code now fixes it, shown to the author.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "task_done",
       description: "Signals that all analysis and reviews for the current file group are finished.",
       parameters: {
@@ -177,6 +199,11 @@ export interface ToolExecutionContext {
   /** Paths changed by the PR. When set, code_comment may only target these files. */
   changedPaths?: string[];
   onCommentEmitted: (comment: EmittedComment) => void;
+  /** Ids resolve_finding accepts: findings posted by earlier reviews and still open. */
+  openFindingIds?: ReadonlySet<string>;
+  /** Ids already resolved in this review (shared across file groups). */
+  resolvedFindingIds?: Set<string>;
+  onFindingResolved?: (resolved: { id: string; reason: string }) => void;
   signal?: AbortSignal;
   /**
    * Read-only directories exposed under a path prefix, e.g. { "@ci-logs": "/tmp/pr-agent-ci-x" }.
@@ -248,6 +275,9 @@ export class ToolDispatcher {
         case "code_comment":
           res = { result: this.codeComment(args) };
           break;
+        case "resolve_finding":
+          res = { result: this.resolveFinding(args) };
+          break;
         case "task_done": {
           const completed = args.state !== "FAILED";
           res = {
@@ -305,6 +335,21 @@ export class ToolDispatcher {
     return { abs, rel, root, mount };
   }
 
+  private resolveFinding(args: Record<string, unknown>): string {
+    const id = typeof args.id === "string" ? args.id.trim() : "";
+    const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+    if (!this.ctx.openFindingIds?.has(id)) {
+      throw new ToolInputError(
+        `'${id}' is not an open finding; use an id listed under <open_findings>`,
+      );
+    }
+    if (!reason) throw new ToolInputError("'reason' is required");
+    if (this.ctx.resolvedFindingIds?.has(id)) return `Finding ${id} is already resolved.`;
+    this.ctx.resolvedFindingIds?.add(id);
+    this.ctx.onFindingResolved?.({ id, reason });
+    return `Finding ${id} marked as resolved.`;
+  }
+
   private codeComment(args: Record<string, unknown>): string {
     const filePath =
       typeof args.path === "string" ? args.path.replace(/\\/g, "/").replace(/^\.?\//, "") : "";
@@ -320,7 +365,8 @@ export class ToolDispatcher {
     }
     const startLine = args.start_line === undefined ? undefined : Number(args.start_line);
     const comment: EmittedComment = {
-      id: `comment_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      // Short enough for the model to copy back into resolve_finding in a later review
+      id: `f${Math.random().toString(36).slice(2, 8)}`,
       path: filePath,
       line,
       start_line:
