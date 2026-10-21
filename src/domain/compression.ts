@@ -1,5 +1,5 @@
 import type { ChatMessage, CompressedMemory } from "../runtime/types.js";
-import type { DeepSeekLLMClient, LLMResponse } from "../llm/client.js";
+import type { LLMClient, LLMResponse } from "../llm/client.js";
 import { countMessagesTokens } from "../runtime/budget.js";
 
 interface Round {
@@ -232,9 +232,9 @@ export function renderMemory(memory: CompressedMemory): string {
  * (most recent rounds) is kept intact.
  */
 export class MemoryCompressor {
-  private llmClient: DeepSeekLLMClient;
+  private llmClient: LLMClient;
 
-  constructor(llmClient: DeepSeekLLMClient) {
+  constructor(llmClient: LLMClient) {
     this.llmClient = llmClient;
   }
 

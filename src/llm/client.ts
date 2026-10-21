@@ -1,48 +1,96 @@
-import { OpenAI } from "openai";
-import type { ChatMessage, ToolCall } from "../runtime/types.js";
-import { AgentTelemetry } from "../telemetry/otel.js";
-import { withRetry } from "../runtime/retry.js";
-import { computeCostUsd, getModelPricing, type ModelPricing, type TokenUsage } from "./pricing.js";
+import type { OpenAI } from "openai";
+import type { ChatMessage } from "../runtime/types.js";
+import { OpenAIChatCompletionsDriver } from "./protocols/chat-completions.js";
+import { AnthropicMessagesDriver } from "./protocols/anthropic-messages.js";
+import { OpenAIResponsesDriver } from "./protocols/openai-responses.js";
+import type {
+  ChatCompletionOptions,
+  LLMClient,
+  LLMClientConfig,
+  LLMResponse,
+  ProtocolDriver,
+  WireProtocol,
+} from "./types.js";
 
-export interface LLMClientConfig {
-  apiKey?: string;
-  baseURL?: string;
-  model?: string;
-  temperature?: number;
+export * from "./types.js";
+
+function resolveDriver(protocol: WireProtocol): ProtocolDriver {
+  switch (protocol) {
+    case "openai-completions":
+      return new OpenAIChatCompletionsDriver();
+    case "anthropic-messages":
+      return new AnthropicMessagesDriver();
+    case "openai-responses":
+      return new OpenAIResponsesDriver();
+    default:
+      throw new Error(`Unsupported wire protocol: '${protocol}'`);
+  }
 }
 
-export interface ChatCompletionOptions {
-  /** Per-request timeout; a timed-out request is retried like other transient failures. */
-  timeoutMs?: number;
+function resolveDefaultBaseURL(protocol: WireProtocol, apiKey?: string): string {
+  if (protocol === "anthropic-messages") {
+    if (process.env.ANTHROPIC_BASE_URL) return process.env.ANTHROPIC_BASE_URL;
+    // If the key is specifically an Anthropic key (starts with sk-ant), use official endpoint
+    if (apiKey?.startsWith("sk-ant-") || process.env.ANTHROPIC_API_KEY) {
+      return "https://api.anthropic.com";
+    }
+    // DeepSeek's Anthropic-compatible endpoint
+    return "https://api.deepseek.com/anthropic";
+  }
+
+  if (protocol === "openai-responses") {
+    if (process.env.OPENAI_BASE_URL) return process.env.OPENAI_BASE_URL;
+    // If explicitly using DeepSeek environment without OpenAI key, target DeepSeek responses
+    if (
+      process.env.DEEPSEEK_API_KEY &&
+      !process.env.OPENAI_API_KEY &&
+      !apiKey?.startsWith("sk-proj-")
+    ) {
+      return "https://api.deepseek.com";
+    }
+    return "https://api.openai.com/v1";
+  }
+
+  if (process.env.DEEPSEEK_BASE_URL) return process.env.DEEPSEEK_BASE_URL;
+  if (process.env.OPENAI_BASE_URL) return process.env.OPENAI_BASE_URL;
+  if (
+    apiKey?.startsWith("sk-proj-") ||
+    (!process.env.DEEPSEEK_API_KEY && process.env.OPENAI_API_KEY)
+  ) {
+    return "https://api.openai.com/v1";
+  }
+  return "https://api.deepseek.com";
 }
 
-export interface LLMResponse {
-  content: string;
-  reasoningContent?: string;
-  toolCalls?: ToolCall[];
-  usage: TokenUsage;
-}
-
-export class DeepSeekLLMClient {
-  private client: OpenAI;
+export class GenericLLMClient implements LLMClient {
+  public readonly protocol: WireProtocol;
   public readonly model: string;
   public readonly temperature: number;
-  private pricing: ModelPricing;
+  private apiKey: string;
+  private baseURL: string;
+  private headers?: Record<string, string>;
+  private driver: ProtocolDriver;
 
   constructor(config: LLMClientConfig = {}) {
-    const apiKey = config.apiKey || process.env.DEEPSEEK_API_KEY;
-    if (!apiKey) {
-      throw new Error("DEEPSEEK_API_KEY is not set");
-    }
-    this.client = new OpenAI({
-      apiKey,
-      baseURL: config.baseURL || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com",
-      // Retries are owned by withRetry below; stacking SDK retries on top multiplies attempts.
-      maxRetries: 0,
-    });
+    this.protocol = config.protocol || "openai-completions";
     this.model = config.model || process.env.DEEPSEEK_MODEL || "deepseek-flash";
     this.temperature = config.temperature ?? 0.1;
-    this.pricing = getModelPricing(this.model);
+    this.headers = config.headers;
+
+    const apiKey =
+      config.apiKey ||
+      process.env.DEEPSEEK_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY;
+
+    if (!apiKey) {
+      throw new Error(
+        "API key is not set (expected DEEPSEEK_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)",
+      );
+    }
+    this.apiKey = apiKey;
+    this.baseURL = config.baseURL || resolveDefaultBaseURL(this.protocol, this.apiKey);
+    this.driver = resolveDriver(this.protocol);
   }
 
   public async chatCompletion(
@@ -51,92 +99,38 @@ export class DeepSeekLLMClient {
     signal?: AbortSignal,
     options: ChatCompletionOptions = {},
   ): Promise<LLMResponse> {
-    const span = AgentTelemetry.startLLMSpan(this.model, messages[messages.length - 1]?.content);
+    return await this.driver.chat(
+      {
+        apiKey: this.apiKey,
+        baseURL: this.baseURL,
+        model: this.model,
+        temperature: this.temperature,
+        headers: this.headers,
+      },
+      messages,
+      tools,
+      signal,
+      options,
+    );
+  }
+}
 
-    try {
-      const response = await withRetry(
-        async () => {
-          return await this.client.chat.completions.create(
-            {
-              model: this.model,
-              messages: messages.map((m) => {
-                if (m.role === "tool") {
-                  return {
-                    role: "tool",
-                    content: m.content,
-                    tool_call_id: m.tool_call_id || "call_unknown",
-                  };
-                }
-                if (m.role === "assistant") {
-                  return {
-                    role: "assistant",
-                    content: m.content || "",
-                    tool_calls: m.tool_calls as
-                      | OpenAI.Chat.Completions.ChatCompletionMessageToolCall[]
-                      | undefined,
-                  };
-                }
-                return {
-                  role: m.role,
-                  content: m.content,
-                };
-              }),
-              tools: tools && tools.length > 0 ? tools : undefined,
-              temperature: this.temperature,
-            },
-            // The SDK rejects `timeout: undefined`, so only pass it when set.
-            options.timeoutMs ? { signal, timeout: options.timeoutMs } : { signal },
-          );
-        },
-        // Up to 5 retries with full-jitter backoff capped at 2s, 4s, 8s, 16s, 30s: rides out
-        // short network outages (about a minute in total) before the group fails with llm_error.
-        { maxRetries: 5, initialDelayMs: 2000, maxDelayMs: 30_000 },
-        signal,
-      );
+/**
+ * Creates an LLM client configured with the given options and wire protocol.
+ */
+export function createLLMClient(config: LLMClientConfig = {}): LLMClient {
+  return new GenericLLMClient(config);
+}
 
-      const choice = response.choices[0];
-      const message = choice.message;
-      const content = message.content || "";
-
-      // Extract reasoning_content returned by thinking-mode models
-      const reasoningContent = (message as unknown as { reasoning_content?: string })
-        .reasoning_content;
-
-      const toolCalls: ToolCall[] = (message.tool_calls || []).map((tc) => ({
-        id: tc.id,
-        type: "function",
-        function: {
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        },
-      }));
-
-      // DeepSeek reports the context-cache split as a non-standard usage field.
-      const raw = response.usage as
-        | (OpenAI.Completions.CompletionUsage & { prompt_cache_hit_tokens?: number })
-        | undefined;
-      const tokens = {
-        promptTokens: raw?.prompt_tokens || 0,
-        completionTokens: raw?.completion_tokens || 0,
-        totalTokens: raw?.total_tokens || 0,
-        cacheHitTokens: raw?.prompt_cache_hit_tokens || 0,
-      };
-      const usage: TokenUsage = { ...tokens, costUsd: computeCostUsd(this.pricing, tokens) };
-
-      AgentTelemetry.recordLLMResult(span, content, usage);
-      span.end();
-
-      return {
-        content,
-        reasoningContent,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage,
-      };
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setAttribute("error", true);
-      span.end();
-      throw err;
-    }
+/**
+ * Backward-compatible DeepSeekLLMClient.
+ * Defaults to the 'openai-completions' protocol targeting api.deepseek.com.
+ */
+export class DeepSeekLLMClient extends GenericLLMClient {
+  constructor(config: LLMClientConfig = {}) {
+    super({
+      ...config,
+      protocol: config.protocol ?? "openai-completions",
+    });
   }
 }

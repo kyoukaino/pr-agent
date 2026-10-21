@@ -66,8 +66,17 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
 
   // Extract env overrides
   const envConfig: PRAgentUserConfig = {
-    apiKey: process.env.DEEPSEEK_API_KEY,
-    baseURL: process.env.DEEPSEEK_BASE_URL,
+    protocol: (process.env.PR_AGENT_PROTOCOL as PRAgentConfig["protocol"]) || undefined,
+    apiKey:
+      process.env.PR_AGENT_API_KEY ||
+      process.env.DEEPSEEK_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY,
+    baseURL:
+      process.env.PR_AGENT_BASE_URL ||
+      process.env.DEEPSEEK_BASE_URL ||
+      process.env.OPENAI_BASE_URL ||
+      process.env.ANTHROPIC_BASE_URL,
     model: process.env.PR_AGENT_MODEL || process.env.DEEPSEEK_MODEL || undefined,
     budget: {
       maxCostUsd: process.env.PR_AGENT_MAX_COST_USD

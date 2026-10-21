@@ -6,12 +6,32 @@ export interface ModelPricing {
   inputCacheHit: number;
   inputCacheMiss: number;
   output: number;
+  /** Whether the provider offers an off-peak discount (e.g. DeepSeek off-peak halving). */
+  hasOffPeakDiscount?: boolean;
 }
 
 export const DEEPSEEK_PEAK_PRICING_USD = {
-  "deepseek-flash": { inputCacheHit: 0.006, inputCacheMiss: 0.3, output: 1.2 },
-  "deepseek-v4-pro": { inputCacheHit: 0.044, inputCacheMiss: 1.32, output: 3.96 },
+  "deepseek-flash": {
+    inputCacheHit: 0.006,
+    inputCacheMiss: 0.3,
+    output: 1.2,
+    hasOffPeakDiscount: true,
+  },
+  "deepseek-v4-pro": {
+    inputCacheHit: 0.044,
+    inputCacheMiss: 1.32,
+    output: 3.96,
+    hasOffPeakDiscount: true,
+  },
 } satisfies Record<string, ModelPricing>;
+
+export const KNOWN_MODEL_PRICINGS_USD: Record<string, ModelPricing> = {
+  ...DEEPSEEK_PEAK_PRICING_USD,
+  "claude-3-5-sonnet-20241022": { inputCacheHit: 0.3, inputCacheMiss: 3.0, output: 15.0 },
+  "claude-3-7-sonnet-20250219": { inputCacheHit: 0.3, inputCacheMiss: 3.0, output: 15.0 },
+  "gpt-4o": { inputCacheHit: 1.25, inputCacheMiss: 2.5, output: 10.0 },
+  "gpt-4o-mini": { inputCacheHit: 0.075, inputCacheMiss: 0.15, output: 0.6 },
+};
 
 export interface TokenUsage {
   promptTokens: number;
@@ -20,6 +40,13 @@ export interface TokenUsage {
   /** Prompt tokens served from DeepSeek's context cache (billed at the cache-hit rate). */
   cacheHitTokens: number;
   costUsd: number;
+}
+
+export function tryGetModelPricing(model: string): ModelPricing | undefined {
+  return (
+    KNOWN_MODEL_PRICINGS_USD[model] ||
+    (DEEPSEEK_PEAK_PRICING_USD as Record<string, ModelPricing>)[model]
+  );
 }
 
 export function getModelPricing(model: string): ModelPricing {
@@ -55,5 +82,8 @@ export function computeCostUsd(
       cacheMiss * pricing.inputCacheMiss +
       usage.completionTokens * pricing.output) /
     1_000_000;
+  if (!pricing.hasOffPeakDiscount) {
+    return peakCost;
+  }
   return isPeakHour(at) ? peakCost : peakCost / 2;
 }

@@ -18,7 +18,7 @@ import {
 import type { ParsedFileDiff } from "./domain/diff-parser.js";
 import { CI_LOGS_MOUNT } from "./domain/tools.js";
 import { ReviewPayloadAssembler } from "./domain/assembler.js";
-import { DeepSeekLLMClient } from "./llm/client.js";
+import { createLLMClient, type LLMClient } from "./llm/client.js";
 import { AgentRuntimeEngine, type ResolvedFinding } from "./runtime/engine.js";
 import type { ChatMessage, MainLoopStop } from "./runtime/types.js";
 import { CheckpointStore } from "./runtime/checkpoint.js";
@@ -140,12 +140,13 @@ export interface AnswerReplyResult {
 
 export class PRAgent {
   public readonly config: PRAgentConfig;
-  private llmClient: DeepSeekLLMClient;
+  private llmClient: LLMClient;
   private checkpointStore: CheckpointStore;
 
   constructor(userConfig: PRAgentUserConfig = {}) {
     this.config = PRAgentConfigSchema.parse(userConfig);
-    this.llmClient = new DeepSeekLLMClient({
+    this.llmClient = createLLMClient({
+      protocol: this.config.protocol,
       apiKey: this.config.apiKey,
       baseURL: this.config.baseURL,
       model: this.config.model,

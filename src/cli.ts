@@ -22,6 +22,10 @@ program
   .option("-d, --diff <file>", "Path to git diff file")
   .option("--git", "Automatically extract diff from local git (git diff HEAD~1..HEAD)")
   .option("-m, --model <name>", "DeepSeek model (deepseek-flash, deepseek-v4-pro)")
+  .option(
+    "--protocol <protocol>",
+    "Wire protocol (openai-completions, anthropic-messages, openai-responses)",
+  )
   .option("--config <path>", "Explicit path to pr-agent config file (e.g. pr-agent.config.ts)")
   .option("-t, --temperature <number>", "Sampling temperature (default: 0.1)")
   .option("-b, --background <text>", "Requirement/business intent background")
@@ -35,6 +39,7 @@ program
       const { config, configFile } = await loadConfig({
         configFile: opts.config,
         overrides: {
+          protocol: opts.protocol,
           model: opts.model,
           temperature: opts.temperature !== undefined ? Number(opts.temperature) : undefined,
           budget: opts.maxCost !== undefined ? { maxCostUsd: Number(opts.maxCost) } : undefined,

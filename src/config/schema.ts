@@ -30,9 +30,12 @@ export const ReviewPolicySchema = z.object({
 });
 
 export const PRAgentConfigSchema = z.object({
+  protocol: z
+    .enum(["openai-completions", "anthropic-messages", "openai-responses"])
+    .default("openai-completions"),
   model: z.string().default("deepseek-flash"),
   apiKey: z.string().optional(),
-  baseURL: z.string().url().default("https://api.deepseek.com"),
+  baseURL: z.string().url().optional(),
   temperature: z.coerce.number().min(0).max(2).default(0.1),
   budget: BudgetConfigSchema.default({}),
   limits: LimitsConfigSchema.default({}),

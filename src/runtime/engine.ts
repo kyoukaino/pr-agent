@@ -1,4 +1,4 @@
-import type { DeepSeekLLMClient, LLMResponse } from "../llm/client.js";
+import type { LLMClient, LLMResponse } from "../llm/client.js";
 import { MainLoopStop, type ChatMessage, type ToolResult } from "./types.js";
 import { ExecutionBudgetController, type BudgetConfig } from "./budget.js";
 import { MemoryCompressor } from "../domain/compression.js";
@@ -13,7 +13,7 @@ import { AgentTelemetry } from "../telemetry/otel.js";
 export interface AgentRuntimeOptions {
   runId: string;
   repoDir: string;
-  llmClient: DeepSeekLLMClient;
+  llmClient: LLMClient;
   budgetConfig?: BudgetConfig;
   checkpointStore?: CheckpointStore;
   traceRecorder?: RunTraceRecorder;
@@ -68,7 +68,7 @@ const GRACE_ROUND_TOOLS = new Set([
 export class AgentRuntimeEngine {
   public readonly runId: string;
   private repoDir: string;
-  private llmClient: DeepSeekLLMClient;
+  private llmClient: LLMClient;
   private budget: ExecutionBudgetController;
   private compressor: MemoryCompressor;
   private streakTracker = new ToolFailureStreakTracker(3);

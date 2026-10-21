@@ -1,4 +1,4 @@
-import { DeepSeekLLMClient } from "../src/llm/client.js";
+import { createLLMClient, type LLMClient } from "../src/llm/client.js";
 import type { GeneratedComment, ReferenceComment } from "./types.js";
 
 /** Minimal promise pool so judge calls run concurrently without flooding the API. */
@@ -18,7 +18,7 @@ export function createLimiter(concurrency: number) {
 }
 
 export class BenchJudge {
-  private client: DeepSeekLLMClient;
+  private client: LLMClient;
   private limit: ReturnType<typeof createLimiter>;
   public calls = 0;
   public failures = 0;
@@ -27,7 +27,7 @@ export class BenchJudge {
     public readonly model: string,
     concurrency: number,
   ) {
-    this.client = new DeepSeekLLMClient({ model, temperature: 0 });
+    this.client = createLLMClient({ model, temperature: 0 });
     this.limit = createLimiter(concurrency);
   }
 
