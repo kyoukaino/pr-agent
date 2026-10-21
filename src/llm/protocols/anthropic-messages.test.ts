@@ -73,11 +73,69 @@ describe("Anthropic protocol payload mapping", () => {
       content: "I will check the diff.",
     });
 
-    // Subsequent user message should NOT have cache_control
+    // Latest user message should have sliding cache_control breakpoint
     expect(anthropicMessages[2]).toEqual({
       role: "user",
-      content: "Next step",
+      content: [
+        {
+          type: "text",
+          text: "Next step",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
     });
+  });
+
+  it("slides the dynamic breakpoint to the latest turn while keeping anchor breakpoint on frozen diff", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "frozen diff content" },
+      {
+        role: "assistant",
+        content: "checking",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "read_file", arguments: '{"path":"a.ts"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "result round 1" },
+      {
+        role: "assistant",
+        content: "checking 2",
+        tool_calls: [
+          {
+            id: "call_2",
+            type: "function",
+            function: { name: "grep_code", arguments: '{"pattern":"foo"}' },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_2", content: "result round 2" },
+    ];
+
+    const { messages: anthropicMessages } = toAnthropicPayload(messages, true);
+
+    // [0]: User (frozen diff) -> Breakpoint 1 (Anchor)
+    // [1]: Assistant (round 1)
+    // [2]: User (round 1 tool result) -> NO breakpoint (slid forward)
+    // [3]: Assistant (round 2)
+    // [4]: User (round 2 tool result) -> Breakpoint 2 (Sliding)
+    expect(anthropicMessages).toHaveLength(5);
+
+    // Breakpoint 1: Anchor on frozen diff
+    const diffBlock = (anthropicMessages[0].content as any[])[0];
+    expect(diffBlock.cache_control).toEqual({ type: "ephemeral" });
+
+    // Round 1 tool result: sliding breakpoint has moved past it
+    const round1Block = (anthropicMessages[2].content as any[])[0];
+    expect(round1Block.cache_control).toBeUndefined();
+
+    // Round 2 tool result: has the active sliding breakpoint
+    const round2Block = (anthropicMessages[4].content as any[])[0];
+    expect(round2Block.cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("merges consecutive tool results into a single user message", () => {

@@ -131,6 +131,34 @@ export function toAnthropicPayload(
     }
   }
 
+  // Dual-breakpoint strategy:
+  // - Breakpoint 1: Static anchor on initial task/diff (Frozen zone) set above.
+  // - Breakpoint 2: Automatic sliding breakpoint on the latest user interaction (tool results / follow-up).
+  if (injectCacheBreakpoint && anthropicMessages.length > 1) {
+    for (let i = anthropicMessages.length - 1; i >= 0; i--) {
+      const msg = anthropicMessages[i];
+      if (msg.role === "user") {
+        if (i > 0) {
+          if (typeof msg.content === "string") {
+            msg.content = [
+              {
+                type: "text",
+                text: msg.content,
+                cache_control: { type: "ephemeral" },
+              },
+            ];
+          } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+            const lastBlock = msg.content[msg.content.length - 1] as {
+              cache_control?: { type: "ephemeral" };
+            };
+            lastBlock.cache_control = { type: "ephemeral" };
+          }
+        }
+        break;
+      }
+    }
+  }
+
   return {
     system: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
     messages: anthropicMessages,
