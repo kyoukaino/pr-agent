@@ -1,37 +1,62 @@
-import { getEncoding, type Tiktoken } from "js-tiktoken";
 import type { ChatMessage } from "./types.js";
 
-let encoder: Tiktoken | null = null;
+/**
+ * Characters per billed token, measured on DeepSeek over 2135 review rounds of code-heavy context
+ * (cl100k is ~4, so a tokenizer like tiktoken undercounts by ~1.7x; it was no more precise per round).
+ */
+export const CHARS_PER_TOKEN = 2.35;
 
-function getTiktoken(): Tiktoken {
-  if (!encoder) {
-    encoder = getEncoding("cl100k_base");
-  }
-  return encoder;
+/** Character-based token estimate, used where no billed count is available. */
+export function estimateTokens(text: string): number {
+  return text ? Math.ceil(text.length / CHARS_PER_TOKEN) : 0;
 }
 
-export function countTokens(text: string): number {
-  if (!text) return 0;
-  try {
-    return getTiktoken().encode(text).length;
-  } catch {
-    // Fallback estimation: ~4 chars per token
-    return Math.ceil(text.length / 4);
-  }
-}
-
-export function countMessagesTokens(messages: ChatMessage[]): number {
+export function estimateMessagesTokens(messages: ChatMessage[]): number {
   let total = 0;
   for (const m of messages) {
     // reasoning_content is kept for tracing but never sent back to the API, so it is not counted.
-    total += countTokens(m.content);
+    total += estimateTokens(m.content);
     if (m.tool_calls) {
       for (const tc of m.tool_calls) {
-        total += countTokens(tc.function.name) + countTokens(tc.function.arguments);
+        total += estimateTokens(tc.function.name) + estimateTokens(tc.function.arguments);
       }
     }
   }
   return total;
+}
+
+/**
+ * Size of the next request, anchored on what the API billed for the previous one: its
+ * `prompt_tokens` plus an estimate of the messages appended since. Only the appended part is
+ * estimated, so the estimate error stays small. Without an anchor (first call, a resumed session,
+ * right after compression rewrote the history) the whole request is estimated, tool definitions
+ * included via `fixedTokens`.
+ */
+export class ContextMeter {
+  private anchor: { tokens: number; messageCount: number } | null = null;
+
+  constructor(private readonly fixedTokens = 0) {}
+
+  /** Records the billed prompt size of a request that sent the first `messageCount` messages. */
+  public record(messageCount: number, promptTokens: number): void {
+    this.anchor = promptTokens > 0 ? { tokens: promptTokens, messageCount } : null;
+  }
+
+  /** Drops the anchor once the messages it counted were rewritten. */
+  public invalidate(): void {
+    this.anchor = null;
+  }
+
+  public get anchored(): boolean {
+    return this.anchor !== null;
+  }
+
+  public measure(messages: ChatMessage[]): number {
+    if (this.anchor && messages.length >= this.anchor.messageCount) {
+      return this.anchor.tokens + estimateMessagesTokens(messages.slice(this.anchor.messageCount));
+    }
+    return this.fixedTokens + estimateMessagesTokens(messages);
+  }
 }
 
 export interface BudgetConfig {
@@ -141,13 +166,13 @@ export class ExecutionBudgetController {
     return now >= this.subtaskDeadline;
   }
 
-  public shouldCompress(messages: ChatMessage[]): boolean {
-    return countMessagesTokens(messages) > this.promptTokenLimit;
+  /** `contextTokens` is the size of the next request, as measured by a {@link ContextMeter}. */
+  public shouldCompress(contextTokens: number): boolean {
+    return contextTokens > this.promptTokenLimit;
   }
 
   /** Reserved for non-blocking compression between the soft and warning watermarks; not wired yet. */
-  public shouldTriggerAsyncCompression(messages: ChatMessage[]): boolean {
-    const tokens = countMessagesTokens(messages);
-    return tokens > this.softTokenLimit && tokens <= this.promptTokenLimit;
+  public shouldTriggerAsyncCompression(contextTokens: number): boolean {
+    return contextTokens > this.softTokenLimit && contextTokens <= this.promptTokenLimit;
   }
 }

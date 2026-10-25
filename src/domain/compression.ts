@@ -1,6 +1,6 @@
 import type { ChatMessage, CompressedMemory } from "../runtime/types.js";
 import type { LLMClient, LLMResponse } from "../llm/client.js";
-import { countMessagesTokens } from "../runtime/budget.js";
+import { estimateMessagesTokens } from "../runtime/budget.js";
 
 interface Round {
   assistantIdx: number;
@@ -71,7 +71,7 @@ export function partitionMessages(
   // Recent rounds kept verbatim get half of the warning limit, minus the frozen prompt and the
   // current memory, so that frozen + memory + active lands well below the trigger instead of
   // re-triggering immediately.
-  const frozenTokens = countMessagesTokens(messages.slice(0, historyStart));
+  const frozenTokens = estimateMessagesTokens(messages.slice(0, historyStart));
   const budget = Math.max(0, Math.floor(maxContextTokens * warningThreshold * 0.5) - frozenTokens);
 
   // Compute how many trailing rounds fit in the budget from the end
@@ -79,8 +79,9 @@ export function partitionMessages(
   let activeCount = 0;
 
   for (let i = rounds.length - 1; i >= 0; i--) {
-    // Same measure as the compression trigger (countMessagesTokens), so "fits" and "over" agree.
-    const roundTokens = countMessagesTokens([
+    // Same character estimate as the check right after compression (no billed anchor exists for the
+    // rewritten history), so "fits" here and "under the limit" there agree.
+    const roundTokens = estimateMessagesTokens([
       messages[rounds[i].assistantIdx],
       ...rounds[i].toolIdxs.map((ti) => messages[ti]),
     ]);

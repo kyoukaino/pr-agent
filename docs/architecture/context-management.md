@@ -14,7 +14,24 @@
 
 **源码**：[`src/domain/compression.ts`](../../src/domain/compression.ts)
 
-每次调用模型之前，如果上下文 Token 数超过 `maxContextTokens × warningWatermark`（默认 128k × 0.8），就先对消息序列分区并压缩。放在调用之前检查，是因为 GitHub App 会话在接着上一次对话继续时会追加一条新消息（新提交的 diff 或作者的回复），这条消息本身就可能让上下文越过阈值：
+每次调用模型之前，如果上下文 Token 数超过 `maxContextTokens × warningWatermark`（默认 128k × 0.8），就先对消息序列分区并压缩。放在调用之前检查，是因为 GitHub App 会话在接着上一次对话继续时会追加一条新消息（新提交的 diff 或作者的回复），这条消息本身就可能让上下文越过阈值。
+
+### Token 测量
+
+**源码**：[`src/runtime/budget.ts`](../../src/runtime/budget.ts) 中的 `ContextMeter`
+
+不使用分词器。上下文大小以 **API 对上一次请求计费的 `prompt_tokens` 为锚点**，加上锚点之后新追加消息（上一轮的回复与工具调用、这一轮的工具结果、会话追加的后续消息）的字符估算。估算只覆盖新增的一小段，误差影响很小。各协议的 `promptTokens` 都已换算为包含缓存命中与缓存写入的总输入量。
+
+- **字符估算**：字符数 ÷ 2.35（`CHARS_PER_TOKEN`），是 DeepSeek 在代码类上下文上的实测系数；`reasoning_content` 不回传给 API，不计入。
+- **没有锚点时估算整个请求**：子任务的第一次调用、会话恢复后（会话文件不保存每条消息的 usage）、压缩改写历史之后（上一次的计数已作废）。此时还要加上工具定义的估算，它随每个请求发送但不在消息里。
+- **余量**：水位线之上留有 20% 窗口（默认约 25.6k），足以容纳一次工具输出的上限（40k 字符，约 17k token）。
+- **审查开始之前**还没有任何 API 返回值，文件过大过滤（单文件 diff 超过 `maxContextTokens × warningWatermark`）和文件组分组预算（`× 0.25`）也使用同一字符估算。
+
+每次压缩都写入 trace 的 `compressions` 数组，见 [运行时架构](runtime-architecture.md#7-run-trace)。
+
+### 分区与记忆槽
+
+越过阈值时，消息序列按下图分区：
 
 ```text
 ┌───────────────────┬──────────────┬───────────────────────────┬──────────────────────────┐
@@ -66,12 +83,12 @@ Working memory of your earlier turns on this file group (older turns were compre
 
 ### 活跃区大小
 
-活跃区不是固定轮数，而是从最新一轮往前累加，直到达到 `maxContextTokens × warningWatermark × 0.5 − (Frozen + Memory) 的 Token 数`。留出一半余量，是为了让"Frozen + Memory + 活跃区"明显低于触发线，避免下一轮立刻再次压缩。如果所有轮次都放得下，就不压缩，也不调用 LLM。
+活跃区不是固定轮数，而是从最新一轮往前累加，直到达到 `maxContextTokens × warningWatermark × 0.5 − (Frozen + Memory) 的 Token 数`（各部分均按字符估算，与压缩后的复查口径一致）。留出一半余量，是为了让"Frozen + Memory + 活跃区"明显低于触发线，避免下一轮立刻再次压缩。如果所有轮次都放得下，就不压缩，也不调用 LLM。
 
 ### 失败与停止
 
 - 摘要调用失败时保留原消息不变；若是因为取消而失败，则继续向上抛出。
-- 压缩后仍超过水位线，说明 Frozen 区（或累积的记忆）本身过大，子任务以 `compression` 停止。
+- 压缩后对整个请求重新估算，仍超过水位线，说明 Frozen 区（或累积的记忆）本身过大，子任务以 `compression` 停止。
 - 摘要调用的花费计入成本预算。
 
 > 上下文窗口只用于压缩判断，不限制花费（`softWatermark` 为后续后台压缩预留，当前不生效）；花费由 `maxCostUsd` 控制，见 [运行时架构](runtime-architecture.md#2-预算控制)。

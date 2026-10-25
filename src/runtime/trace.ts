@@ -18,6 +18,25 @@ export interface TraceTurn {
   durationMs: number;
 }
 
+export interface TraceCompression {
+  subtaskKey: string;
+  /** Wall-clock start of the compression (ISO). */
+  startedAt: string;
+  /** Context size that triggered it: billed prompt of the last request plus estimated additions. */
+  tokensBefore: number;
+  /** "billed" when tokensBefore is anchored on an API count, "estimate" when wholly estimated. */
+  measuredFrom: "billed" | "estimate";
+  /** Character estimate of the context afterwards (no billed count exists yet). */
+  tokensAfter: number;
+  messagesBefore: number;
+  messagesAfter: number;
+  /** False when nothing was replaced (all rounds fit, the summary call failed or came back empty). */
+  compressed: boolean;
+  /** Usage of the summarization call; absent when no call was made. */
+  usage?: TokenUsage;
+  durationMs: number;
+}
+
 export interface RunTraceManifest {
   runId: string;
   repo: string;
@@ -26,6 +45,7 @@ export interface RunTraceManifest {
   endTime?: string;
   model: string;
   turns: TraceTurn[];
+  compressions: TraceCompression[];
   finalCommentsCount: number;
   totalTokensUsed: number;
   costUsd: number;
@@ -53,6 +73,7 @@ export class RunTraceRecorder {
       startTime: new Date().toISOString(),
       model,
       turns: [],
+      compressions: [],
       finalCommentsCount: 0,
       totalTokensUsed: 0,
       costUsd: 0,
@@ -67,6 +88,14 @@ export class RunTraceRecorder {
     this.manifest.turns.push(turn);
     this.manifest.totalTokensUsed += turn.usage.totalTokens;
     this.manifest.costUsd += turn.usage.costUsd;
+  }
+
+  public recordCompression(compression: TraceCompression): void {
+    this.manifest.compressions.push(compression);
+    if (compression.usage) {
+      this.manifest.totalTokensUsed += compression.usage.totalTokens;
+      this.manifest.costUsd += compression.usage.costUsd;
+    }
   }
 
   public finalize(commentsCount: number): string {

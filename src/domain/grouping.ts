@@ -1,5 +1,5 @@
 import type { ParsedFileDiff } from "./diff-parser.js";
-import { countTokens } from "../runtime/budget.js";
+import { estimateTokens } from "../runtime/budget.js";
 
 export interface FileGroup {
   label: string;
@@ -32,7 +32,7 @@ export function partitionFileGroups(diffs: ParsedFileDiff[], budget: number): Fi
 
   const sized = [...diffs]
     .sort((a, b) => a.path.localeCompare(b.path))
-    .map((file) => ({ file, tokens: countTokens(file.promptDiff) }));
+    .map((file) => ({ file, tokens: estimateTokens(file.promptDiff) }));
   const total = sized.reduce((sum, s) => sum + s.tokens, 0);
   if (total <= budget) {
     return [

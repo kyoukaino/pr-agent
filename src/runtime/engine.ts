@@ -1,6 +1,11 @@
 import type { LLMClient, LLMResponse } from "../llm/client.js";
 import { MainLoopStop, type ChatMessage, type ToolResult } from "./types.js";
-import { ExecutionBudgetController, type BudgetConfig } from "./budget.js";
+import {
+  ContextMeter,
+  ExecutionBudgetController,
+  estimateTokens,
+  type BudgetConfig,
+} from "./budget.js";
 import { MemoryCompressor } from "../domain/compression.js";
 import { ToolFailureStreakTracker } from "./retry.js";
 import { TaskCancellationTree } from "./cancellation.js";
@@ -180,6 +185,9 @@ export class AgentRuntimeEngine {
     const span = AgentTelemetry.startAgentSpan(`subtask.${subtaskKey}`);
     return await AgentTelemetry.withSpan(span, async () => {
       let messages = [...initialMessages];
+      // Tool definitions are sent with every request but are not messages; they count only while
+      // the whole request is estimated.
+      const contextMeter = new ContextMeter(estimateTokens(JSON.stringify(this.tools)));
       let roundsLeft = maxRounds;
       let stopReason = MainLoopStop.StopNone;
       let completed = false;
@@ -236,7 +244,10 @@ export class AgentRuntimeEngine {
 
           // Memory compression once the context crosses the watermark. Checked before every model
           // call, so a continued session whose follow-up pushed it over is compressed first.
-          if (this.budget.shouldCompress(messages)) {
+          const contextTokens = contextMeter.measure(messages);
+          if (this.budget.shouldCompress(contextTokens)) {
+            const compressionStartedAt = new Date();
+            const measuredFrom = contextMeter.anchored ? "billed" : "estimate";
             const compressed = await this.compressor.compress(messages, {
               maxContextTokens: this.budget.maxContextWindow,
               warningThreshold: this.budget.tokenWarningThreshold,
@@ -244,8 +255,25 @@ export class AgentRuntimeEngine {
               timeoutMs: this.budget.roundTimeoutMs,
             });
             if (compressed.usage) this.budget.recordUsage(compressed.usage);
+            const didCompress = compressed.messages !== messages;
+            // The billed count covered the replaced history; the next one arrives with the next call.
+            if (didCompress) contextMeter.invalidate();
+            const messagesBefore = messages.length;
             messages = compressed.messages;
-            if (this.budget.shouldCompress(messages)) {
+            const tokensAfter = contextMeter.measure(messages);
+            this.traceRecorder?.recordCompression({
+              subtaskKey,
+              startedAt: compressionStartedAt.toISOString(),
+              tokensBefore: contextTokens,
+              measuredFrom,
+              tokensAfter,
+              messagesBefore,
+              messagesAfter: messages.length,
+              compressed: didCompress,
+              usage: compressed.usage,
+              durationMs: Date.now() - compressionStartedAt.getTime(),
+            });
+            if (this.budget.shouldCompress(tokensAfter)) {
               // Still exceeds threshold after compression: stop loop safely
               stopReason = MainLoopStop.StopCompression;
               break;
@@ -257,6 +285,7 @@ export class AgentRuntimeEngine {
 
           // 1. LLM Step
           const response = await this.callModel(messages);
+          contextMeter.record(messages.length, response.usage.promptTokens);
           const toolCalls = response.toolCalls || [];
 
           if (toolCalls.length === 0) {

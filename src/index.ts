@@ -27,7 +27,7 @@ import { initTelemetry, AgentTelemetry } from "./telemetry/otel.js";
 import { SqliteTraceStore } from "./telemetry/sqlite-store.js";
 import type { EmittedComment, PRAgentReviewPayload } from "./domain/github-types.js";
 import type { BudgetConfig } from "./runtime/budget.js";
-import { countTokens } from "./runtime/budget.js";
+import { estimateTokens } from "./runtime/budget.js";
 import {
   PRAgentConfigSchema,
   type PRAgentConfig,
@@ -207,7 +207,7 @@ export class PRAgent {
           let reason: SkippedFile["reason"] | null = null;
           if (isGeneratedOrLockfile(f.path)) reason = "generated_or_lockfile";
           else if (f.hunkRanges.length === 0) reason = "no_text_hunks"; // binary, pure rename, mode change
-          else if (countTokens(f.promptDiff) > promptTokenCeiling) reason = "too_large";
+          else if (estimateTokens(f.promptDiff) > promptTokenCeiling) reason = "too_large";
           if (reason) skippedFiles.push({ path: f.path, reason });
           return reason === null;
         });

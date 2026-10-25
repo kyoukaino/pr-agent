@@ -20,7 +20,7 @@ docs/
 ## 架构
 
 - [运行时架构](architecture/runtime-architecture.md)：ReAct 调度循环与停止原因；按 DeepSeek 价格与缓存命中计算的成本预算，以及按文件组公平分配的方式；Grace Round 与前缀缓存保护；重试、熔断、取消；检查点与断点续跑。
-- [上下文管理](architecture/context-management.md)：Frozen / Compress / Active 三区压缩，保留工具调用轨迹与已提交评论；带 `R<n>` / `L<n>` 行号的 Diff；避免 GitHub 422 的锚点校验。
+- [上下文管理](architecture/context-management.md)：以计费 `prompt_tokens` 为锚点的 token 测量；Frozen / Compress / Active 三区压缩，保留工具调用轨迹与已提交评论；带 `R<n>` / `L<n>` 行号的 Diff；避免 GitHub 422 的锚点校验。
 - [上下文压缩：讨论与调查记录](architecture/context-compression-investigation.md)：异步压缩方案选择、会话场景的问题，以及基于基准测试 trace 的调查（token 估算偏低约 1.7 倍，压缩从未触发）和待办。
 - [GitHub App 架构 RFC](architecture/github-app-deployment-rfc.md)：Webhook 验签后立即返回 202、BullMQ 排队限流、新提交到来时取消旧任务。
 

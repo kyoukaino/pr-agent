@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vite-plus/test";
 import { groupTokenBudget, partitionFileGroups } from "./grouping.js";
-import { countTokens } from "../runtime/budget.js";
+import { estimateTokens } from "../runtime/budget.js";
 import type { ParsedFileDiff } from "./diff-parser.js";
 
 function file(path: string, words: number): ParsedFileDiff {
@@ -32,7 +32,7 @@ describe("partitionFileGroups", () => {
   });
 
   it("packs larger PRs in path order without exceeding the budget", () => {
-    const size = countTokens(file("x", 100).promptDiff);
+    const size = estimateTokens(file("x", 100).promptDiff);
     const diffs = ["src/d.ts", "src/a.ts", "lib/b.ts", "src/c.ts", "lib/a.ts"].map((p) =>
       file(p, 100),
     );

@@ -135,3 +135,5 @@ pr-agent review --diff sample.diff --resume <runId>
 **源码**：[`src/runtime/trace.ts`](../../src/runtime/trace.ts)
 
 每次审查生成 `.pr-agent/traces/trace-{runId}.json`，逐轮记录请求消息、模型输出、推理内容（`reasoning_content`）、工具调用及结果、耗时，以及该轮的 Token 用量、缓存命中数和花费。`pr-agent view` 读取这些数据进行回放。
+
+每次触发记忆压缩还会在 `compressions` 数组中记一条：文件组、开始时间与耗时；压缩前的上下文大小 `tokensBefore` 及其来源 `measuredFrom`（`billed` 表示以上一次计费值为锚点，`estimate` 表示整段估算）；压缩后的估算值 `tokensAfter`；压缩前后的消息数；是否真的替换了历史 `compressed`（所有轮次都放得下、摘要调用失败或返回空时为 `false`）；摘要调用的 `usage`。摘要调用的 Token 与花费也计入 trace 的总量。
