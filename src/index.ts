@@ -196,10 +196,11 @@ export class PRAgent {
           : undefined;
 
         // 3. Pre-flight Size Filtering (exclude single files exceeding warning watermark of max context tokens)
+        // this.config is schema-parsed, so its budget fields always carry the defaults.
         const maxContextTokens =
-          options.budgetConfig?.maxContextTokens || this.config.budget.maxContextTokens || 128_000;
+          options.budgetConfig?.maxContextTokens || this.config.budget.maxContextTokens;
         const warningWatermark =
-          options.budgetConfig?.warningWatermark || this.config.budget.warningWatermark || 0.8;
+          options.budgetConfig?.warningWatermark || this.config.budget.warningWatermark;
         const promptTokenCeiling = Math.floor(maxContextTokens * warningWatermark);
 
         const skippedFiles: SkippedFile[] = [];

@@ -1,3 +1,4 @@
+import { BUDGET_DEFAULTS } from "../config/schema.js";
 import type { ChatMessage } from "./types.js";
 
 /**
@@ -62,14 +63,14 @@ export class ContextMeter {
 export interface BudgetConfig {
   /** Spending cap for the whole PR review in USD (0 = unlimited). */
   maxCostUsd?: number;
-  /** Context window used for compression decisions (default: 128,000). Not a spending limit. */
+  /** Context window used for compression decisions. Not a spending limit. */
   maxContextTokens?: number;
-  /** Fraction of the context window reserved for future background compression (default: 0.6). */
+  /** Fraction of the context window reserved for future background compression. */
   softWatermark?: number;
-  /** Fraction of the context window that triggers memory compression (default: 0.8). */
+  /** Fraction of the context window that triggers memory compression. */
   warningWatermark?: number;
-  roundTimeoutMs?: number; // Per-LLM-call timeout (default: 5 min; reasoning models can think for minutes)
-  totalTimeoutMs?: number; // Wall-clock limit for the whole review (default: 30 min)
+  roundTimeoutMs?: number; // Per-LLM-call timeout (reasoning models can think for minutes)
+  totalTimeoutMs?: number; // Wall-clock limit for the whole review
 }
 
 export interface UsageDelta {
@@ -102,12 +103,13 @@ export class ExecutionBudgetController {
   private subtaskDeadline = Infinity;
 
   constructor(config: BudgetConfig = {}) {
+    // Unset maxCostUsd means unlimited here; the configured default applies through the config.
     this.maxCostUsd = config.maxCostUsd ?? 0;
-    this.maxContextTokens = config.maxContextTokens ?? 128_000;
-    this.tokenSoftThreshold = config.softWatermark ?? 0.6;
-    this.tokenWarningThreshold = config.warningWatermark ?? 0.8;
-    this.roundTimeoutMs = config.roundTimeoutMs ?? 300_000;
-    this.totalTimeoutMs = config.totalTimeoutMs ?? 1_800_000;
+    this.maxContextTokens = config.maxContextTokens ?? BUDGET_DEFAULTS.maxContextTokens;
+    this.tokenSoftThreshold = config.softWatermark ?? BUDGET_DEFAULTS.softWatermark;
+    this.tokenWarningThreshold = config.warningWatermark ?? BUDGET_DEFAULTS.warningWatermark;
+    this.roundTimeoutMs = config.roundTimeoutMs ?? BUDGET_DEFAULTS.roundTimeoutMs;
+    this.totalTimeoutMs = config.totalTimeoutMs ?? BUDGET_DEFAULTS.totalTimeoutMs;
     this.startTime = Date.now();
     this.subtaskCostCeiling = this.maxCostUsd > 0 ? this.maxCostUsd : Infinity;
     this.subtaskDeadline = this.startTime + this.totalTimeoutMs;

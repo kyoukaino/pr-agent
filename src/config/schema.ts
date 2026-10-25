@@ -4,12 +4,17 @@ export const BudgetConfigSchema = z.object({
   /** Spending cap per PR review in USD, computed from DeepSeek pricing (0 = unlimited). */
   maxCostUsd: z.coerce.number().min(0).default(1),
   /** Context window used for memory compression; not a spending limit. */
-  maxContextTokens: z.coerce.number().positive().default(128_000),
+  maxContextTokens: z.coerce.number().positive().default(256_000),
   softWatermark: z.number().min(0).max(1).default(0.6),
   warningWatermark: z.number().min(0).max(1).default(0.8),
   roundTimeoutMs: z.coerce.number().positive().default(300_000),
   totalTimeoutMs: z.coerce.number().positive().default(1_800_000),
 });
+
+/** The budget defaults, read from the schema so they are defined in one place. */
+export const BUDGET_DEFAULTS: Readonly<z.infer<typeof BudgetConfigSchema>> = Object.freeze(
+  BudgetConfigSchema.parse({}),
+);
 
 /** Safety limits: backstops against runaway loops, not spending controls. */
 export const LimitsConfigSchema = z.object({

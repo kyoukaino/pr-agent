@@ -13,7 +13,7 @@ export default {
     // Spending cap per PR review in USD, computed from DeepSeek pricing and cache hits
     maxCostUsd: 1,
     // Context window used for memory compression (not a spending limit)
-    maxContextTokens: 128_000,
+    maxContextTokens: 256_000,
     roundTimeoutMs: 300_000, // per LLM call; reasoning models can think for minutes
     totalTimeoutMs: 1_800_000,
   },

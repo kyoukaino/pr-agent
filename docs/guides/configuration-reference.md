@@ -102,7 +102,7 @@ export default defineConfig({
 | 字段                      | 类型   | 默认值    | 说明                                                                                                                                     |
 | :------------------------ | :----- | :-------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
 | `budget.maxCostUsd`       | number | `1`       | 单个 PR 审查的花费上限（美元，按 DeepSeek 价格与缓存命中计算），按剩余组数公平分给各文件组；`0` 为不限。环境变量 `PR_AGENT_MAX_COST_USD` |
-| `budget.maxContextTokens` | number | `128000`  | 用于压缩判断的上下文窗口，不限制花费                                                                                                     |
+| `budget.maxContextTokens` | number | `256000`  | 用于压缩判断的上下文窗口，不限制花费                                                                                                     |
 | `budget.softWatermark`    | number | `0.6`     | 预留：后续非阻塞后台压缩的参考线，当前不触发任何行为                                                                                     |
 | `budget.warningWatermark` | number | `0.8`     | 警戒水位阈值（80%），每次调用模型前上下文达到该比例即触发同步记忆压缩                                                                    |
 | `budget.roundTimeoutMs`   | number | `300000`  | 单次 LLM 调用的超时（5 分钟），超时按可重试错误处理                                                                                      |

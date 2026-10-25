@@ -14,7 +14,7 @@
 
 **源码**：[`src/domain/compression.ts`](../../src/domain/compression.ts)
 
-每次调用模型之前，如果上下文 Token 数超过 `maxContextTokens × warningWatermark`（默认 128k × 0.8），就先对消息序列分区并压缩。放在调用之前检查，是因为 GitHub App 会话在接着上一次对话继续时会追加一条新消息（新提交的 diff 或作者的回复），这条消息本身就可能让上下文越过阈值。
+每次调用模型之前，如果上下文 Token 数超过 `maxContextTokens × warningWatermark`（默认值见 [配置参考](../guides/configuration-reference.md#32-预算控制配置-budget)），就先对消息序列分区并压缩。放在调用之前检查，是因为 GitHub App 会话在接着上一次对话继续时会追加一条新消息（新提交的 diff 或作者的回复），这条消息本身就可能让上下文越过阈值。
 
 ### Token 测量
 
@@ -24,7 +24,7 @@
 
 - **字符估算**：字符数 ÷ 2.35（`CHARS_PER_TOKEN`），是 DeepSeek 在代码类上下文上的实测系数；`reasoning_content` 不回传给 API，不计入。
 - **没有锚点时估算整个请求**：子任务的第一次调用、会话恢复后（会话文件不保存每条消息的 usage）、压缩改写历史之后（上一次的计数已作废）。此时还要加上工具定义的估算，它随每个请求发送但不在消息里。
-- **余量**：水位线之上留有 20% 窗口（默认约 25.6k），足以容纳一次工具输出的上限（40k 字符，约 17k token）。
+- **余量**：水位线之上留有 `maxContextTokens × (1 − warningWatermark)` 的窗口，取值时应让它大于一次工具输出的上限（40k 字符，约 17k token）。
 - **审查开始之前**还没有任何 API 返回值，文件过大过滤（单文件 diff 超过 `maxContextTokens × warningWatermark`）和文件组分组预算（`× 0.25`）也使用同一字符估算。
 
 每次压缩都写入 trace 的 `compressions` 数组，见 [运行时架构](runtime-architecture.md#7-run-trace)。
