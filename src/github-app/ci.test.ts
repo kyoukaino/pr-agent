@@ -9,7 +9,7 @@ import {
   type CiCheckRun,
   type CiSnapshot,
 } from "./ci.js";
-import { CI_LOGS_MOUNT } from "../domain/tools.js";
+import { CI_LOGS_MOUNT } from "../domain/workspace.js";
 import { buildInitialUserPrompt } from "../domain/prompt.js";
 
 const run = (over: Partial<CiCheckRun>): CiCheckRun => ({
@@ -95,8 +95,8 @@ describe("CI results in the review task", () => {
   it("adds a tagged, untrusted section only when CI results exist", () => {
     const base = {
       groupLabel: "all changed files",
-      groupDiffs: [],
-      allChangedPaths: [],
+      groupFiles: [],
+      groupCount: 1,
       confirmedComments: [],
     };
     const withCi = buildInitialUserPrompt({ ...base, ciResults: "- build (failure)" });

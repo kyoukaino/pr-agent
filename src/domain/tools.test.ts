@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vite-plus/test";
-import { CI_LOGS_MOUNT, ToolDispatcher, TOOL_OUTPUT_LIMITS } from "./tools.js";
+import { ToolDispatcher, TOOL_OUTPUT_LIMITS } from "./tools.js";
+import { CI_LOGS_MOUNT, PR_DIFF_MOUNT } from "./workspace.js";
 import type { EmittedComment } from "./github-types.js";
 
 describe("ToolDispatcher", () => {
@@ -182,5 +183,56 @@ describe("ToolDispatcher mounts (CI logs)", () => {
     );
     expect(comment.failed).toBe(true);
     expect(emitted).toHaveLength(0);
+  });
+});
+
+describe("ToolDispatcher diff mounts", () => {
+  let root: string;
+  let tools: ToolDispatcher;
+  const reads: [string, number, number][] = [];
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "pr-agent-diffmount-"));
+    fs.mkdirSync(path.join(root, "repo"));
+    fs.mkdirSync(path.join(root, "pr-diff", "src"), { recursive: true });
+    const diff = ["@@ -1,1 +1,2 @@", "R1   keep", "R2 + added"];
+    // Wide lines so that the output limit, not the line cap, ends a long read.
+    const wide = Array.from({ length: 300 }, (_, i) => `R${i + 1} + ${"x".repeat(390)}`);
+    fs.writeFileSync(path.join(root, "pr-diff", "src", "a.ts.diff"), diff.join("\n"));
+    fs.writeFileSync(path.join(root, "pr-diff", "src", "wide.ts.diff"), wide.join("\n"));
+    tools = new ToolDispatcher({
+      repoDir: path.join(root, "repo"),
+      mounts: { [PR_DIFF_MOUNT]: path.join(root, "pr-diff") },
+      diffMounts: [PR_DIFF_MOUNT],
+      onCommentEmitted: () => {},
+      onFileRead: (p, s, e) => reads.push([p, s, e]),
+    });
+  });
+
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it("shows rendered diffs without a second line numbering and reports the read", async () => {
+    const res = await tools.execute(
+      "read_file",
+      JSON.stringify({ path: `${PR_DIFF_MOUNT}/src/a.ts.diff` }),
+    );
+    expect(res.result).toBe(
+      `--- ${PR_DIFF_MOUNT}/src/a.ts.diff (L1-L3 of 3) ---\n@@ -1,1 +1,2 @@\nR1   keep\nR2 + added`,
+    );
+    expect(reads.at(-1)).toEqual([`${PR_DIFF_MOUNT}/src/a.ts.diff`, 1, 3]);
+  });
+
+  it("stops at the output limit on a whole line and reports exactly the lines shown", async () => {
+    const res = await tools.execute(
+      "read_file",
+      JSON.stringify({ path: `${PR_DIFF_MOUNT}/src/wide.ts.diff` }),
+    );
+    const [, , end] = reads.at(-1)!;
+    expect(end).toBeLessThan(300);
+    expect(res.result.length).toBeLessThanOrEqual(TOOL_OUTPUT_LIMITS.maxOutputChars);
+    expect(res.result).toContain(`(L1-L${end} of 300)`);
+    expect(res.result).toContain(`continue from start_line ${end + 1}`);
+    const shown = res.result.split("\n").filter((l) => l.startsWith("R"));
+    expect(shown).toHaveLength(end);
   });
 });

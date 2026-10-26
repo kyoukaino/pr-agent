@@ -138,6 +138,7 @@ async function reviewInstance(instance: BenchInstance, outFile: string): Promise
       commit_id: ws.headCommit,
       rawDiff: ws.rawDiff,
       repoDir: ws.repoDir,
+      mounts: ws.mounts,
       background: `PR title: ${ws.prTitle}\n\n${ws.prBody.slice(0, 4000)}`.trim(),
     });
 
@@ -155,6 +156,7 @@ async function reviewInstance(instance: BenchInstance, outFile: string): Promise
       usage: result.usage,
       agentRunId: result.runId,
       skippedFiles: result.skippedFiles,
+      coverage: result.coverage,
       groups: result.groups.map((g) => ({
         group: g.group,
         files: g.files,

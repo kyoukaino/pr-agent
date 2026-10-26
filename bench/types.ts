@@ -56,8 +56,15 @@ export interface ReviewRecord {
   durationMs: number;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number; costUsd: number };
   agentRunId?: string;
-  /** Diff files the agent did not review (generated, binary, too large). */
+  /** Diff files the agent did not review (generated, binary). */
   skippedFiles?: { path: string; reason: string }[];
+  /** How much of the diffs reviewed from a mount (oversized, on demand) the agent read. */
+  coverage?: {
+    inlineFiles: number;
+    mountedFiles: number;
+    mountedHunks: number;
+    mountedHunksRead: number;
+  };
   /** How each file group ended; a stopReason other than "none" means the group was cut short. */
   groups?: { group: string; files: number; stopReason: string; costUsd: number; error?: string }[];
   comments: GeneratedComment[];

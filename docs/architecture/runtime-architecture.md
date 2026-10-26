@@ -4,7 +4,7 @@
 
 ## 1. 调度循环
 
-PR-Agent 不依赖通用 Agent 框架，而是针对代码审查实现了一个专用的 ReAct 循环（[`src/runtime/engine.ts`](../../src/runtime/engine.ts)）。一个 PR 的 Diff 先按目录拆分为若干文件组，每组作为一个子任务依次执行：
+PR-Agent 不依赖通用 Agent 框架，而是针对代码审查实现了一个专用的 ReAct 循环（[`src/runtime/engine.ts`](../../src/runtime/engine.ts)）。一个 PR 的 Diff 先按 token 预算拆分为若干文件组（放得下时只有一组，规则见 [上下文管理](context-management.md#41-文件组)），每组作为一个子任务依次执行：
 
 ```mermaid
 flowchart TD

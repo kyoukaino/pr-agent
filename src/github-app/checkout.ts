@@ -8,6 +8,8 @@ const execFileAsync = promisify(execFile);
 
 export interface PRCheckout {
   dir: string;
+  /** The extra commits that were fetched; one that is missing could not be. */
+  fetched: Set<string>;
   cleanup: () => Promise<void>;
 }
 
@@ -15,9 +17,11 @@ export interface PRCheckout {
  * Materializes the PR head revision in a throwaway directory so the agent's read_file / grep_code
  * tools see the code under review (not the worker's own filesystem).
  *
- * Shallow-fetches refs/pull/{n}/head, which also works for PRs opened from forks. The installation
- * token is passed as an HTTP header through GIT_CONFIG_* environment variables, so it never appears
- * in the remote URL, the process arguments or .git/config.
+ * Shallow-fetches refs/pull/{n}/head, which also works for PRs opened from forks, plus any extra
+ * commits the review compares against (the merge base, the last reviewed commit): with their trees
+ * present, the diffs are computed locally instead of through GitHub's size-limited diff API.
+ * The installation token is passed as an HTTP header through GIT_CONFIG_* environment variables,
+ * so it never appears in the remote URL, the process arguments or .git/config.
  */
 export async function checkoutPullRequest(params: {
   owner: string;
@@ -25,6 +29,8 @@ export async function checkoutPullRequest(params: {
   pullNumber: number;
   headSha: string;
   token: string;
+  /** Commits to fetch as well (shallow); failures are reported through `fetched`, not thrown. */
+  extraCommits?: (string | undefined)[];
   signal?: AbortSignal;
 }): Promise<PRCheckout> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-agent-"));
@@ -72,7 +78,24 @@ export async function checkoutPullRequest(params: {
       ]);
     }
     await git(["checkout", "--quiet", "--detach", params.headSha]);
-    return { dir, cleanup };
+
+    const extra = new Set<string>();
+    for (const sha of new Set(params.extraCommits?.filter((c): c is string => Boolean(c)))) {
+      try {
+        await git([
+          "fetch",
+          "--quiet",
+          "--depth=1",
+          "--no-tags",
+          `https://github.com/${params.owner}/${params.repo}.git`,
+          sha,
+        ]);
+        extra.add(sha);
+      } catch {
+        // garbage-collected or unreachable: the caller falls back to GitHub's diff
+      }
+    }
+    return { dir, fetched: extra, cleanup };
   } catch (err) {
     await cleanup();
     throw err;

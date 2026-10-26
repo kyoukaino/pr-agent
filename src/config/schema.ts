@@ -31,6 +31,11 @@ export const TelemetryConfigSchema = z.object({
 export const ReviewPolicySchema = z.object({
   minSeverityToBlock: z.enum(["P0", "P1", "P2", "P3"]).default("P1"),
   maxCommentsPerReview: z.coerce.number().int().positive().default(30),
+  /**
+   * File groups a review may take before low-risk files (tests, docs) are left out of the groups
+   * and reviewed on demand from the diff mount; 0 never leaves them out.
+   */
+  maxInlineGroups: z.coerce.number().int().min(0).default(8),
   enableAstGrep: z.coerce.boolean().default(true),
 });
 

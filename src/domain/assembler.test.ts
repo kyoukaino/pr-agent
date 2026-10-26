@@ -140,3 +140,25 @@ describe("verdict of a follow-up review", () => {
     expect(clean.event).toBe("APPROVE");
   });
 });
+
+describe("ReviewPayloadAssembler coverage notes", () => {
+  it("lists mounted files whose hunks were not all read", () => {
+    const payload = ReviewPayloadAssembler.assemble({
+      owner: "o",
+      repo: "r",
+      pull_number: 1,
+      commit_id: "abc",
+      comments: [],
+      relocator: new DiffAnchorRelocator(parseGitDiff(SAMPLE_DIFF)),
+      unreadFiles: [
+        { path: "gen/big.ts", mode: "oversized", totalHunks: 9, unread: ["R1-R5", "R40-R80"] },
+        { path: "docs/guide.md", mode: "on_demand", totalHunks: 2, unread: ["R1-R3", "R9-R9"] },
+      ],
+    });
+    expect(payload.body).toContain("### Partially Reviewed");
+    expect(payload.body).toContain(
+      "- `gen/big.ts` (too large for a prompt) — 2 of 9 hunks not read: R1-R5, R40-R80",
+    );
+    expect(payload.body).toContain("- `docs/guide.md` (low-risk, reviewed on demand) — not read");
+  });
+});

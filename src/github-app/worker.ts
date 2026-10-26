@@ -9,9 +9,10 @@ import { TaskCancellationTree } from "../runtime/cancellation.js";
 import type { GitHubAppConfig } from "./config.js";
 import type { PRReviewJobData, PRReviewQueueManager } from "./queue.js";
 import type { GitHubAppAuthManager } from "./auth.js";
-import { checkoutPullRequest } from "./checkout.js";
+import { CI_LOGS_MOUNT } from "../domain/workspace.js";
 import { collectCiContext, fetchCiSnapshot, shouldWaitForCi } from "./ci.js";
-import { fetchIncrementalDiff, loadReviewHistory } from "./history.js";
+import { isPushedOnTop, loadReviewHistory } from "./history.js";
+import { preparePRContext } from "./pr-context.js";
 import { loadOpenFindings, resolveFindingThreads, resolveThread } from "./threads.js";
 import type { PRSessionStore } from "./session-store.js";
 
@@ -146,15 +147,15 @@ export class PRReviewWorker {
         finished = true;
         return;
       }
-      const incrementalDiff = history.lastReviewedCommit
-        ? await fetchIncrementalDiff(
+      const pushedOnTop = history.lastReviewedCommit
+        ? await isPushedOnTop(
             octokit,
             data.owner,
             data.repo,
             history.lastReviewedCommit,
             data.commit_id,
           )
-        : undefined;
+        : false;
       const openFindings = await loadOpenFindings(
         octokit,
         data.owner,
@@ -175,19 +176,26 @@ export class PRReviewWorker {
       const ci = await collectCiContext(octokit, data.owner, data.repo, ciSnapshot, os.tmpdir());
       ciCleanup = ci.cleanup;
 
-      // 5. Fetch raw diff from GitHub API if not pre-cached
-      let rawDiff = data.rawDiff;
-      if (!rawDiff) {
-        const diffResponse = await octokit.rest.pulls.get({
-          owner: data.owner,
-          repo: data.repo,
-          pull_number: data.pull_number,
-          mediaType: { format: "diff" },
-        });
-        rawDiff = diffResponse.data as unknown as string;
-      }
+      // 5. Check out the PR head with its merge base (and the last reviewed commit) so the diffs
+      // are computed locally, whatever the PR size, and context tools read the code under review.
+      const ctx = await preparePRContext({
+        octokit,
+        token,
+        owner: data.owner,
+        repo: data.repo,
+        pullNumber: data.pull_number,
+        headSha: data.commit_id,
+        baseSha: pull.base.sha,
+        sinceCommit: pushedOnTop ? history.lastReviewedCommit : undefined,
+        rawDiff: data.rawDiff,
+        prInfo: { title: pull.title, body: pull.body },
+        signal: cancellationTree.signal,
+      });
+      cleanup = ctx.cleanup;
+      const { rawDiff, incrementalDiff } = ctx;
+      console.log(pc.gray(`[Worker] PR diff from ${ctx.diffSource}.`));
 
-      if (!rawDiff || !rawDiff.trim()) {
+      if (!rawDiff.trim()) {
         console.log(pc.yellow(`[Worker] No diff content for PR #${data.pull_number}. Skipping.`));
         finished = true;
         return;
@@ -203,17 +211,6 @@ export class PRReviewWorker {
           return;
         }
       }
-
-      // 6. Check out the PR head so context tools read the code under review.
-      const checkout = await checkoutPullRequest({
-        owner: data.owner,
-        repo: data.repo,
-        pullNumber: data.pull_number,
-        headSha: data.commit_id,
-        token,
-        signal: cancellationTree.signal,
-      });
-      cleanup = checkout.cleanup;
 
       // 7. Instantiate PR-Agent with the project configuration (rules, budget, policy)
       const { config } = await loadConfig({
@@ -238,10 +235,10 @@ export class PRReviewWorker {
         pull_number: data.pull_number,
         commit_id: data.commit_id,
         rawDiff,
-        repoDir: checkout.dir,
+        repoDir: ctx.dir,
         background,
         ciResults: ci.summary || undefined,
-        ciLogsDir: ci.logsDir,
+        mounts: { ...ctx.mounts, ...(ci.logsDir ? { [CI_LOGS_MOUNT]: ci.logsDir } : {}) },
         previousFindings,
         openFindings,
         session,
@@ -358,20 +355,17 @@ export class PRReviewWorker {
 [Worker] Answering ${reply.author}'s reply on ${data.owner}/${data.repo}#${data.pull_number} (finding ${finding.id})...`,
         ),
       );
-      const { data: rawDiff } = await octokit.rest.pulls.get({
-        owner: data.owner,
-        repo: data.repo,
-        pull_number: data.pull_number,
-        mediaType: { format: "diff" },
-      });
-      const checkout = await checkoutPullRequest({
+      const ctx = await preparePRContext({
+        octokit,
+        token,
         owner: data.owner,
         repo: data.repo,
         pullNumber: data.pull_number,
         headSha: pull.head.sha,
-        token,
+        baseSha: pull.base.sha,
+        prInfo: { title: pull.title, body: pull.body },
       });
-      cleanup = checkout.cleanup;
+      cleanup = ctx.cleanup;
 
       const { config } = await loadConfig({
         overrides: { model: data.model || this.config.model },
@@ -382,8 +376,9 @@ export class PRReviewWorker {
         repo: data.repo,
         pull_number: data.pull_number,
         commit_id: pull.head.sha,
-        rawDiff: rawDiff as unknown as string,
-        repoDir: checkout.dir,
+        rawDiff: ctx.rawDiff,
+        repoDir: ctx.dir,
+        mounts: ctx.mounts,
         finding,
         author: reply.author,
         reply: reply.body,

@@ -4,10 +4,10 @@
 docs/
 ├── architecture/
 │   ├── runtime-architecture.md        # 调度循环、成本预算、Grace Round、容错、检查点
-│   ├── context-management.md          # 三区记忆压缩、带行号的 Diff、锚点校验
+│   ├── context-management.md          # 三区记忆压缩、带行号的 Diff、锚点校验、挂载目录
 │   ├── context-compression-investigation.md # 压缩的讨论与调查记录（token 估算偏差、待办）
 │   ├── github-app-deployment-rfc.md   # GitHub App 服务架构设计 (RFC-001)
-│   └── large-pr-context-rfc.md        # 超大 PR 与审查上下文的访问方式 (RFC-002，规划中)
+│   └── large-pr-context-rfc.md        # 超大 PR 与审查上下文的访问方式 (RFC-002)
 ├── guides/
 │   ├── cli-reference.md               # review / server / view 子命令与参数
 │   ├── configuration-reference.md     # 配置分层、全部配置项与示例
@@ -21,10 +21,10 @@ docs/
 ## 架构
 
 - [运行时架构](architecture/runtime-architecture.md)：ReAct 调度循环与停止原因；按 DeepSeek 价格与缓存命中计算的成本预算，以及按文件组公平分配的方式；Grace Round 与前缀缓存保护；重试、熔断、取消；检查点与断点续跑。
-- [上下文管理](architecture/context-management.md)：以计费 `prompt_tokens` 为锚点的 token 测量；Frozen / Compress / Active 三区压缩，保留工具调用轨迹与已提交评论；带 `R<n>` / `L<n>` 行号的 Diff；避免 GitHub 422 的锚点校验。
+- [上下文管理](architecture/context-management.md)：以计费 `prompt_tokens` 为锚点的 token 测量；Frozen / Compress / Active 三区压缩，保留工具调用轨迹与已提交评论；带 `R<n>` / `L<n>` 行号的 Diff；避免 GitHub 422 的锚点校验；文件组、挂载目录（`@pr-diff` / `@base` / `@pr` / `@ci-logs`）、初始任务结构与覆盖率。
 - [上下文压缩：讨论与调查记录](architecture/context-compression-investigation.md)：异步压缩方案选择、会话场景的问题，以及基于基准测试 trace 的调查（token 估算偏低约 1.7 倍，压缩从未触发）和待办。
 - [GitHub App 架构 RFC](architecture/github-app-deployment-rfc.md)：Webhook 验签后立即返回 202、BullMQ 排队限流、新提交到来时取消旧任务。
-- [超大 PR 与上下文访问 RFC](architecture/large-pr-context-rfc.md)（规划中）：分组保证覆盖，`@pr-diff` / `@base` / `@pr` 只读挂载补充上下文，跨版本查询才引入受限的 `git_inspect`；分阶段实现计划。
+- [超大 PR 与上下文访问 RFC](architecture/large-pr-context-rfc.md)（阶段 0–4 已实现，阶段 5 规划中）：分组保证覆盖，`@pr-diff` / `@base` / `@pr` 只读挂载补充上下文，跨版本查询才引入受限的 `git_inspect`；分阶段实现计划。
 
 ## 使用
 

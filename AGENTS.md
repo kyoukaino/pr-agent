@@ -29,8 +29,8 @@ CI（`.github/workflows/ci.yml`）依次运行 `vp check`、`vp run typecheck`�
 
 ### 一次审查的主流程（`PRAgent.runReview`，`src/index.ts`）
 
-1. `domain/diff-parser` 解析 diff；生成文件/lockfile、无文本 hunk、单文件超过 `maxContextTokens × warningWatermark` 的文件被跳过并记入 `skippedFiles`。
-2. `domain/grouping` 按 token 预算把文件打包成文件组（diff 放得下时只有一组）。
+1. `domain/diff-parser` 解析 diff；生成文件/lockfile、无文本 hunk 的文件被跳过并记入 `skippedFiles`。
+2. `domain/grouping` 按 token 预算把文件打包成文件组（diff 放得下时只有一组）；超过组预算的单个文件单独成组、从 `@pr-diff` 分段读取；组数超过 `review.maxInlineGroups` 时测试与文档改为按需审查。`domain/workspace.ts` 生成 diff 挂载目录，审查用的各类只读目录（`@pr-diff`、`@base`、`@pr`、`@ci-logs`）都经 `read_file` / `grep_code` 访问，不新增工具；`domain/coverage.ts` 统计挂载 diff 的 hunk 覆盖率。
 3. 每个文件组是一个子任务，由 `runtime/engine.ts` 的 `AgentRuntimeEngine.executeSubtask` 跑 ReAct 循环；工具定义与执行在 `domain/tools.ts`（`ToolDispatcher`：read_file / grep_code / ast-grep / code_comment / task_done 等）。
 4. `domain/assembler.ts` 汇总评论：`domain/relocator.ts` 将行号对照 diff 校验，靠近 hunk 的吸附到边缘，太远的写入 Review 正文，避免 GitHub 422；按 `minSeverityToBlock` 决定 `event`，按 `maxCommentsPerReview` 截断。
 5. 可选发布到 GitHub；写入检查点、trace 与 SQLite。
@@ -52,7 +52,7 @@ CI（`.github/workflows/ci.yml`）依次运行 `vp check`、`vp run typecheck`�
 
 ### GitHub App（`src/github-app/`）
 
-`server.ts` 校验 Webhook HMAC 后立即返回 202 → `queue.ts`（Redis + BullMQ，限流，每个 PR 的 active job 与锁）→ `worker.ts` 处理：`checkout.ts` 检出 PR、`ci.ts` 收集 head 提交的 CI 结果与失败日志（以 `@ci-logs` 挂载给 agent）、`history.ts` 计算增量 diff 与历史发现、`threads.ts` 管理发现线程、`session-store.ts` 将会话存于 `.pr-agent/pr-sessions/`（仅在 Review 发布后保存）。同一 PR 有新提交时，通过 Redis Pub/Sub `pr-agent:cancel` 中止旧任务。`redelivery.ts` 重放 GitHub 投递失败的事件；`tunnel.ts` 支持 Cloudflare 隧道并自动更新 App 的 webhook URL。
+`server.ts` 校验 Webhook HMAC 后立即返回 202 → `queue.ts`（Redis + BullMQ，限流，每个 PR 的 active job 与锁）→ `worker.ts` 处理：`pr-context.ts` 检出 PR head 与 merge base 并在本地生成 diff（`domain/git-snapshot.ts`，绕开 GitHub diff 接口的 300 文件上限）、写出 `@base` 与 `@pr`，`ci.ts` 收集 head 提交的 CI 结果与失败日志（以 `@ci-logs` 挂载给 agent）、`history.ts` 读取历史发现并判断能否增量、`threads.ts` 管理发现线程、`session-store.ts` 将会话存于 `.pr-agent/pr-sessions/`（仅在 Review 发布后保存）。同一 PR 有新提交时，通过 Redis Pub/Sub `pr-agent:cancel` 中止旧任务。`redelivery.ts` 重放 GitHub 投递失败的事件；`tunnel.ts` 支持 Cloudflare 隧道并自动更新 App 的 webhook URL。
 
 ### 配置
 

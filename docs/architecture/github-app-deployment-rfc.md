@@ -97,11 +97,13 @@ flowchart TD
 
 ### 3.4 独立临时工作区与安全克隆
 
-- **源码落地**：[`src/github-app/checkout.ts`](../../src/github-app/checkout.ts)
+- **源码落地**：[`src/github-app/checkout.ts`](../../src/github-app/checkout.ts)、[`src/github-app/pr-context.ts`](../../src/github-app/pr-context.ts)、[`src/domain/git-snapshot.ts`](../../src/domain/git-snapshot.ts)
 - **执行步骤**：
   1. Worker 接收任务后，调用 GitHub Installation Access Token 接口生成短期只读/读写令牌。
-  2. 在本地隔离目录创建单一 PR 工作区，执行 Shallow Clone (`git clone --depth=1`)。
-  3. 执行审查完成后安全销毁临时目录，杜绝并发工作空间污染。
+  2. 通过 compare API 取得 PR 的 merge base，在本地隔离目录中浅抓取（`--depth=1`）PR head、merge base，以及增量审查时上次已审查的提交。令牌通过 `GIT_CONFIG_*` 环境变量以 HTTP 头传递，不出现在 URL、进程参数或 `.git/config` 中；`core.symlinks=false`。
+  3. **在本地生成 diff**：`git diff <merge base> <head>`（忽略全局与系统 git 配置，显式指定重命名检测、3 行上下文等选项，结果与 GitHub 的 PR diff 一致），增量 diff 为 `git diff <上次已审查提交> <head>`。GitHub 的 diff 接口超过 300 个文件就拒绝返回，大体积时还会传输中断，因此只在提交抓取失败时作为回退；增量 diff 拿不到时改为全量审查。
+  4. 把 merge base 中被改动文件的旧版本写入临时目录挂载为 `@base`，PR 描述与提交信息写入 `@pr`（见 [上下文管理](context-management.md#42-审查工作区挂载目录)）。
+  5. 审查（或回复作者）完成后销毁临时目录，杜绝并发工作空间污染。
 
 ### 3.5 等待 CI 与 CI 上下文
 
@@ -123,7 +125,7 @@ flowchart TD
 - **源码落地**：[`src/domain/session.ts`](../../src/domain/session.ts)、[`src/github-app/history.ts`](../../src/github-app/history.ts)、[`src/github-app/threads.ts`](../../src/github-app/threads.ts)、[`src/github-app/session-store.ts`](../../src/github-app/session-store.ts)、[`src/github-app/worker.ts`](../../src/github-app/worker.ts)
 - **问题**：每次推送都从零审查，会把已报过的问题换个说法再报一遍，Agent 也不知道自己之前读过、验证过什么；作者修复问题后，旧评论一直挂着不关闭。
 - **会话（一个 PR 一份）**：审查结束并成功发布后，每个文件组的完整对话保存在 `.pr-agent/pr-sessions/<owner>/<repo>/<pr>.json`（写临时文件后原子改名）。PR 关闭或合并时删除。
-- **新推送接着原会话**：只要会话审查到的提交就是 GitHub 上本 App 最近一次审查的提交，且模型没变，就在原对话末尾追加一条消息，内容包括新旧提交、变更的文件（之前读到的内容可能已过时）、新提交的 CI 结果、仍未解决的发现，以及自上次审查以来的 diff。变更按文件路由到当初审查该文件的对话；PR 新增的文件归入最后一组。冻结区和既有消息保持不变，前缀缓存继续命中。
+- **新推送接着原会话**：只要会话审查到的提交就是 GitHub 上本 App 最近一次审查的提交，且模型没变，就在原对话末尾追加一条消息，内容包括新旧提交、变更的文件（之前读到的内容可能已过时）、按新 head 重新生成的挂载目录、新提交的 CI 结果、仍未解决的发现，以及自上次审查以来的 diff（过大的文件改为 `@incremental-diff` 中的 hunk 索引）。变更按文件路由到当初审查该文件的对话；PR 新增的文件归入最后一组。冻结区和既有消息保持不变，前缀缓存继续命中。
 - **GitHub 是事实来源，会话只是加速**：会话缺失（例如 VM 重建）、与 GitHub 不一致、换了模型，或者 force-push 导致无法增量时，就新开会话，并把 GitHub 上的历史作为种子：
   - 本 App 各次审查摘要 "Key Findings Overview" 中的发现，作为"不得重复"的列表；
   - 能增量时只审查自上次审查以来的 diff（只看 PR 改动过的文件），否则全量审查；

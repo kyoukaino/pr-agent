@@ -5,6 +5,9 @@ import { promisify } from "node:util";
 import { githubApi } from "./github.js";
 import { CACHE_DIR } from "./datasets.js";
 import type { BenchInstance } from "./types.js";
+import { oldPathsOf, parseGitDiff } from "../src/domain/diff-parser.js";
+import { writeRevisionFiles } from "../src/domain/git-snapshot.js";
+import { BASE_MOUNT, PR_INFO_MOUNT } from "../src/domain/workspace.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +21,8 @@ export interface PreparedWorkspace {
   prBody: string;
   /** Directory the agent's read_file / grep_code tools operate on. */
   repoDir: string;
+  /** `@pr` (description) always, `@base` (merge-base files) in checkout mode. */
+  mounts: Record<string, string>;
   cleanup: () => Promise<void>;
 }
 
@@ -114,6 +119,28 @@ async function checkoutWorktree(repo: string, ref: string, sha: string, instance
   };
 }
 
+/**
+ * Merge-base versions of the changed files (`@base`), written from the cached repository. The
+ * merge base is shallow-fetched like the head; without it the review simply has no `@base`.
+ */
+async function writeBaseFiles(
+  repo: string,
+  mergeBase: string,
+  rawDiff: string,
+  outDir: string,
+): Promise<boolean> {
+  const repoDir = await ensureRepo(repo);
+  return withRepoLock(repo, async () => {
+    try {
+      if (!(await hasCommit(repoDir, mergeBase))) await fetchWithRetry(repoDir, mergeBase);
+      await writeRevisionFiles(repoDir, mergeBase, oldPathsOf(parseGitDiff(rawDiff).files), outDir);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 interface PullInfo {
   title: string;
   body: string | null;
@@ -158,6 +185,18 @@ export async function prepareWorkspace(
     );
   }
 
+  // The same mounts the GitHub App provides: PR description, and (checkout mode) the base files.
+  const contextDir = path.join(CACHE_DIR, "context", instance.id.replace(/[^\w.-]/g, "_"));
+  fs.rmSync(contextDir, { recursive: true, force: true });
+  const mounts: Record<string, string> = { [PR_INFO_MOUNT]: path.join(contextDir, "pr") };
+  fs.mkdirSync(mounts[PR_INFO_MOUNT], { recursive: true });
+  fs.writeFileSync(
+    path.join(mounts[PR_INFO_MOUNT], "description.md"),
+    `# ${prTitle}\n\n${prBody}\n`,
+    "utf-8",
+  );
+  const removeContext = async () => fs.rmSync(contextDir, { recursive: true, force: true });
+
   if (mode === "diff-only") {
     // An empty directory: context tools honestly report "not found" instead of reading an unrelated tree.
     const emptyDir = path.join(CACHE_DIR, "empty");
@@ -169,7 +208,8 @@ export async function prepareWorkspace(
       prTitle,
       prBody,
       repoDir: emptyDir,
-      cleanup: async () => {},
+      mounts,
+      cleanup: removeContext,
     };
   }
 
@@ -179,5 +219,24 @@ export async function prepareWorkspace(
     headCommit,
     instance.id,
   );
-  return { baseCommit, headCommit, rawDiff, prTitle, prBody, repoDir: workDir, cleanup };
+  const { merge_base_commit } = await githubApi<{ merge_base_commit: { sha: string } }>(
+    `/repos/${instance.repo}/compare/${baseCommit}...${headCommit}?per_page=1`,
+  );
+  const baseDir = path.join(contextDir, "base");
+  if (await writeBaseFiles(instance.repo, merge_base_commit.sha, rawDiff, baseDir)) {
+    mounts[BASE_MOUNT] = baseDir;
+  }
+  return {
+    baseCommit,
+    headCommit,
+    rawDiff,
+    prTitle,
+    prBody,
+    repoDir: workDir,
+    mounts,
+    cleanup: async () => {
+      await cleanup();
+      await removeContext();
+    },
+  };
 }

@@ -68,8 +68,8 @@ describe("review history", () => {
   it("tells the agent the review scope and the findings it must not repeat", () => {
     const prompt = buildInitialUserPrompt({
       groupLabel: "all changed files",
-      groupDiffs: [],
-      allChangedPaths: [],
+      groupFiles: [],
+      groupCount: 1,
       confirmedComments: [],
       previousFindings: [
         { severity: "P3", path: "ci.yml", line: 6, title: "No concurrency group" },

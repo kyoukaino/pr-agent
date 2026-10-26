@@ -17,6 +17,9 @@ export interface DiffHunkRange {
   newStart: number;
   newLines: number;
   header: string;
+  /** 1-based line span of this hunk (header included) within the file's `promptDiff`. */
+  promptStart: number;
+  promptEnd: number;
 }
 
 export interface ParsedFileDiff {
@@ -74,6 +77,7 @@ export function parseGitDiff(rawDiff: string): ParsedPRDiff {
     let deletions = 0;
 
     const hunkRanges: DiffHunkRange[] = [];
+    let promptLine = 1;
 
     for (const h of f.hunks) {
       hunkRanges.push({
@@ -82,7 +86,10 @@ export function parseGitDiff(rawDiff: string): ParsedPRDiff {
         newStart: h.newStart,
         newLines: h.newLines,
         header: h.content,
+        promptStart: promptLine,
+        promptEnd: promptLine + h.changes.length,
       });
+      promptLine += h.changes.length + 1;
 
       for (const c of h.changes) {
         if (c.type === "insert") insertions++;
@@ -157,6 +164,13 @@ function buildPromptDiff(file: GitDiffFile): string {
     }
   }
   return lines.join("\n");
+}
+
+/** Paths the changed files had before the change: what a base-revision snapshot must contain. */
+export function oldPathsOf(files: ParsedFileDiff[]): string[] {
+  return files
+    .filter((f) => f.type !== "add")
+    .map((f) => (f.oldPath && f.oldPath !== "/dev/null" ? f.oldPath : f.path));
 }
 
 /**

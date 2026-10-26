@@ -5,6 +5,7 @@ import type {
   ReviewEvent,
 } from "./github-types.js";
 import type { DiffAnchorRelocator } from "./relocator.js";
+import type { UnreadFile } from "./coverage.js";
 
 export interface AssembleReviewOptions {
   owner: string;
@@ -20,6 +21,8 @@ export interface AssembleReviewOptions {
   maxCommentsPerReview?: number;
   /** Diff files the agent did not review, listed in the summary so the gap is visible. */
   skippedFiles?: { path: string; reason: string }[];
+  /** Files reviewed from a diff mount whose hunks were not all read. */
+  unreadFiles?: UnreadFile[];
   /** File groups whose review ended early (LLM failure). */
   incompleteGroups?: string[];
   /**
@@ -29,6 +32,16 @@ export interface AssembleReviewOptions {
   stillOpen?: { severity?: string }[];
   /** Earlier findings this review verified as fixed. */
   resolvedCount?: number;
+}
+
+const MAX_SPANS_LISTED = 5;
+
+function describeUnread(f: UnreadFile): string {
+  const kind = f.mode === "on_demand" ? "low-risk, reviewed on demand" : "too large for a prompt";
+  if (f.unread.length === f.totalHunks) return `\`${f.path}\` (${kind}) — not read`;
+  const spans = f.unread.slice(0, MAX_SPANS_LISTED).join(", ");
+  const more = f.unread.length > MAX_SPANS_LISTED ? ", …" : "";
+  return `\`${f.path}\` (${kind}) — ${f.unread.length} of ${f.totalHunks} hunks not read: ${spans}${more}`;
 }
 
 interface UnanchoredFinding {
@@ -123,6 +136,7 @@ export class ReviewPayloadAssembler {
         unanchored,
         droppedCount,
         options.skippedFiles ?? [],
+        options.unreadFiles ?? [],
         options.incompleteGroups ?? [],
       );
 
@@ -141,6 +155,7 @@ export class ReviewPayloadAssembler {
     unanchored: UnanchoredFinding[],
     droppedCount: number,
     skippedFiles: { path: string; reason: string }[],
+    unreadFiles: UnreadFile[],
     incompleteGroups: string[],
   ): string {
     let md = "";
@@ -156,6 +171,10 @@ export class ReviewPayloadAssembler {
     if (skippedFiles.length > 0) {
       md += `\n### Not Reviewed\n\n`;
       for (const f of skippedFiles) md += `- \`${f.path}\` — ${f.reason}\n`;
+    }
+    if (unreadFiles.length > 0) {
+      md += `\n### Partially Reviewed\n\n`;
+      for (const f of unreadFiles) md += `- ${describeUnread(f)}\n`;
     }
     if (incompleteGroups.length > 0) {
       const groups = incompleteGroups.map((g) => `\`${g}\``).join(", ");

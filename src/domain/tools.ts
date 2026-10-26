@@ -68,7 +68,7 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
     function: {
       name: "read_file",
       description:
-        "Reads lines of a file in the repository (head revision) to inspect definitions, callers, or context, or of a CI log listed in <ci_results>. Returns at most 400 lines per call; pass start_line/end_line for large files.",
+        "Reads lines of a file in the repository (head revision) to inspect definitions, callers, or context, or of a file in a workspace directory listed in <workspace> (its path starts with the directory's @name). Returns at most 400 lines per call; pass start_line/end_line for large files.",
       parameters: {
         type: "object",
         required: ["path"],
@@ -110,7 +110,7 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
           path: {
             type: "string",
             description:
-              "Optional directory or file to search instead of the whole repository, e.g. 'src/auth' or a CI log listed in <ci_results>.",
+              "Optional directory or file to search instead of the whole repository, e.g. 'src/auth', or a workspace directory listed in <workspace> such as '@pr-diff'.",
           },
         },
       },
@@ -194,9 +194,6 @@ export function toolDefinitionsFor(sessionTools: boolean) {
     : MAIN_TOOL_DEFINITIONS.filter((t) => !SESSION_TOOL_NAMES.has(t.function.name));
 }
 
-/** Path prefix under which failed CI job logs are mounted read-only for read_file / grep_code. */
-export const CI_LOGS_MOUNT = "@ci-logs";
-
 /** Output limits that keep a single tool result from flooding the context window. */
 export const TOOL_OUTPUT_LIMITS = {
   readFileMaxLines: 400,
@@ -250,6 +247,10 @@ export interface ToolExecutionContext {
    * does not, so they never add noise to code searches.
    */
   mounts?: Record<string, string>;
+  /** Mounts holding rendered diffs: read_file returns their lines without its own line numbers. */
+  diffMounts?: readonly string[];
+  /** Lines read_file actually returned, e.g. for review coverage of mounted diffs. */
+  onFileRead?: (path: string, startLine: number, endLine: number) => void;
 }
 
 interface ResolvedPath {
@@ -437,7 +438,7 @@ export class ToolDispatcher {
   }
 
   private readFile(args: Record<string, unknown>): string {
-    const { abs, rel } = this.resolvePath(args.path);
+    const { abs, rel, mount } = this.resolvePath(args.path);
     if (!fs.statSync(abs).isFile()) throw new ToolInputError(`'${rel}' is not a file`);
     const buf = fs.readFileSync(abs);
     if (buf.subarray(0, 8000).includes(0)) throw new ToolInputError(`'${rel}' is a binary file`);
@@ -446,17 +447,31 @@ export class ToolDispatcher {
     const start = Math.max(1, Number(args.start_line) || 1);
     if (start > lines.length) throw new ToolInputError(`'${rel}' has only ${lines.length} lines`);
     const requestedEnd = Math.min(lines.length, Number(args.end_line) || lines.length);
-    const end = Math.min(requestedEnd, start + TOOL_OUTPUT_LIMITS.readFileMaxLines - 1);
+    const lineCap = Math.min(requestedEnd, start + TOOL_OUTPUT_LIMITS.readFileMaxLines - 1);
 
-    const body = lines
-      .slice(start - 1, end)
-      .map((line, idx) => `${start + idx} | ${clipLine(line.replace(/\r$/, ""))}`)
-      .join("\n");
+    // Rendered diffs already carry R<n>/L<n> anchors; a second numbering would invite copying the
+    // wrong one into code_comment. Lines are added whole until the output limit, so the reported
+    // range is exactly what was shown.
+    const raw = mount !== undefined && (this.ctx.diffMounts ?? []).includes(mount);
+    const budget = TOOL_OUTPUT_LIMITS.maxOutputChars - 200;
+    const shown: string[] = [];
+    let chars = 0;
+    let end = start - 1;
+    for (let n = start; n <= lineCap; n++) {
+      const text = clipLine(lines[n - 1].replace(/\r$/, ""));
+      const line = raw ? text : `${n} | ${text}`;
+      if (shown.length > 0 && chars + line.length + 1 > budget) break;
+      shown.push(line);
+      chars += line.length + 1;
+      end = n;
+    }
+    this.ctx.onFileRead?.(rel, start, end);
+
     const more =
       end < requestedEnd
-        ? `\n…[showing L${start}-L${end} of ${lines.length}; request a narrower range]`
+        ? `\n…[showing L${start}-L${end} of ${lines.length}; continue from start_line ${end + 1} or request a narrower range]`
         : "";
-    return clipOutput(`--- ${rel} (L${start}-L${end} of ${lines.length}) ---\n${body}${more}`);
+    return `--- ${rel} (L${start}-L${end} of ${lines.length}) ---\n${shown.join("\n")}${more}`;
   }
 
   /** Repository search via ripgrep: linear-time regex, honors .gitignore, skips binaries and generated files. */

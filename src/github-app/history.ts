@@ -47,32 +47,61 @@ export async function loadReviewHistory(
 }
 
 /**
- * Diff of the changes pushed since `since`, or undefined when `head` does not descend from it
- * (force-push or rebase), in which case the whole PR has to be reviewed again.
+ * Whether `head` descends from `since`, i.e. the author pushed on top of the last reviewed commit.
+ * A force-push or rebase (or a commit GitHub no longer has) means the whole PR is reviewed again.
  */
-export async function fetchIncrementalDiff(
+export async function isPushedOnTop(
   octokit: Octokit,
   owner: string,
   repo: string,
   since: string,
   head: string,
-): Promise<string | undefined> {
-  const basehead = `${since}...${head}`;
+): Promise<boolean> {
   try {
-    const { data: comparison } = await octokit.rest.repos.compareCommitsWithBasehead({
+    const { data } = await octokit.rest.repos.compareCommitsWithBasehead({
       owner,
       repo,
-      basehead,
+      basehead: `${since}...${head}`,
       per_page: 1,
     });
-    if (comparison.status !== "ahead") return undefined;
+    return data.status === "ahead";
   } catch {
-    return undefined; // the old commit is gone (force-push and garbage collection)
+    return false;
   }
+}
+
+/** Merge base of the PR's base and head, the commit GitHub's PR diff starts from. */
+export async function fetchMergeBase(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+): Promise<string> {
   const { data } = await octokit.rest.repos.compareCommitsWithBasehead({
     owner,
     repo,
-    basehead,
+    basehead: `${base}...${head}`,
+    per_page: 1,
+  });
+  return data.merge_base_commit.sha;
+}
+
+/**
+ * GitHub's diff of `from...to`, the fallback when it cannot be computed locally. Limited by GitHub
+ * (it fails beyond 300 files), see docs/architecture/large-pr-context-rfc.md.
+ */
+export async function fetchCompareDiff(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  from: string,
+  to: string,
+): Promise<string> {
+  const { data } = await octokit.rest.repos.compareCommitsWithBasehead({
+    owner,
+    repo,
+    basehead: `${from}...${to}`,
     mediaType: { format: "diff" },
   });
   return data as unknown as string;

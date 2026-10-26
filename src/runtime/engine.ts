@@ -27,6 +27,10 @@ export interface AgentRuntimeOptions {
   changedPaths?: string[];
   /** Read-only directories exposed to read_file / grep_code under a path prefix (e.g. CI logs). */
   mounts?: Record<string, string>;
+  /** Mounts holding rendered diffs, shown by read_file without its own line numbers. */
+  diffMounts?: readonly string[];
+  /** Lines read_file returned, by path; feeds the review coverage of mounted diffs. */
+  onFileRead?: (path: string, startLine: number, endLine: number) => void;
   /** Safety backstop: max ReAct rounds per subtask (default 100). Not part of the budget. */
   maxRounds?: number;
   /** External cancellation (e.g. a superseded webhook job). */
@@ -82,6 +86,8 @@ export class AgentRuntimeEngine {
   private traceRecorder?: RunTraceRecorder;
   private changedPaths?: string[];
   private mounts?: Record<string, string>;
+  private diffMounts?: readonly string[];
+  private onFileRead?: (path: string, startLine: number, endLine: number) => void;
   private maxRounds: number;
   private openFindingIds: Set<string>;
   private answeringReply: boolean;
@@ -101,6 +107,8 @@ export class AgentRuntimeEngine {
     this.traceRecorder = options.traceRecorder;
     this.changedPaths = options.changedPaths;
     this.mounts = options.mounts;
+    this.diffMounts = options.diffMounts;
+    this.onFileRead = options.onFileRead;
     this.maxRounds = options.maxRounds ?? 100;
     this.openFindingIds = new Set(options.openFindingIds ?? []);
     this.answeringReply = options.answeringReply ?? false;
@@ -202,6 +210,8 @@ export class AgentRuntimeEngine {
         repoDir: this.repoDir,
         changedPaths: this.changedPaths,
         mounts: this.mounts,
+        diffMounts: this.diffMounts,
+        onFileRead: this.onFileRead,
         signal: this.signal,
         onCommentEmitted: (comment) => {
           subtaskComments.push(comment);

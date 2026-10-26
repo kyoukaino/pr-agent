@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { execSync } from "node:child_process";
 import pc from "picocolors";
-import { PRAgent, loadConfig } from "./index.js";
+import { BASE_MOUNT, PRAgent, loadConfig, oldPathsOf, parseGitDiff } from "./index.js";
+import { gitDiff, hasCommit, writeRevisionFiles } from "./domain/git-snapshot.js";
 
 const program = new Command();
 
@@ -47,6 +50,8 @@ program
       });
 
       let rawDiff = "";
+      // Revision the diff starts from (--git): its files are mounted as @base.
+      let baseRev: string | undefined;
       if (opts.diff) {
         if (!fs.existsSync(opts.diff)) {
           console.error(pc.red(`Diff file not found: ${opts.diff}`));
@@ -54,11 +59,8 @@ program
         }
         rawDiff = fs.readFileSync(opts.diff, "utf-8");
       } else if (opts.git) {
-        try {
-          rawDiff = execSync("git diff HEAD~1..HEAD", { encoding: "utf-8" });
-        } catch {
-          rawDiff = execSync("git diff HEAD", { encoding: "utf-8" });
-        }
+        baseRev = (await hasCommit(process.cwd(), "HEAD~1")) ? "HEAD~1" : "HEAD";
+        rawDiff = await gitDiff(process.cwd(), baseRev, baseRev === "HEAD" ? undefined : "HEAD");
       } else {
         console.error(pc.red("Error: Must specify either --diff <file> or --git"));
         process.exit(1);
@@ -89,17 +91,30 @@ program
         console.log(pc.gray(`Commit: ${commitId}`));
       }
 
-      const agent = new PRAgent(config);
-      const payload = await agent.reviewPR({
-        owner: opts.owner,
-        repo: opts.repo,
-        pull_number: Number(opts.pr),
-        commit_id: commitId,
-        rawDiff,
-        background: opts.background,
-        publishToGitHub: opts.publish,
-        resumeRunId: opts.resume,
-      });
+      const mounts: Record<string, string> = {};
+      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pr-agent-cli-"));
+      let payload;
+      try {
+        if (baseRev) {
+          mounts[BASE_MOUNT] = path.join(scratch, "base");
+          const oldPaths = oldPathsOf(parseGitDiff(rawDiff).files);
+          await writeRevisionFiles(process.cwd(), baseRev, oldPaths, mounts[BASE_MOUNT]);
+        }
+        const agent = new PRAgent(config);
+        payload = await agent.reviewPR({
+          owner: opts.owner,
+          repo: opts.repo,
+          pull_number: Number(opts.pr),
+          commit_id: commitId,
+          rawDiff,
+          mounts,
+          background: opts.background,
+          publishToGitHub: opts.publish,
+          resumeRunId: opts.resume,
+        });
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
 
       if (opts.json) {
         console.log(JSON.stringify(payload, null, 2));

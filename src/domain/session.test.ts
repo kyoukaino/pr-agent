@@ -86,7 +86,7 @@ describe("follow-up message", () => {
     const msg = buildFollowUpMessage({
       commit: "c10201f0000",
       sinceCommit: "36fb1e40000",
-      diffs: diff.files,
+      diffs: diff.files.map((d) => ({ diff: d })),
       openFindings: [{ id: "fabc123", severity: "P3", path: "a.ts", line: 1, title: "Unused a" }],
       confirmedComments: [],
     });
@@ -183,8 +183,9 @@ describe("session-only parts", () => {
     const followUp = buildFollowUpMessage({
       commit: "c10201f0000",
       sinceCommit: "36fb1e40000",
-      diffs: parseGitDiff("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-x\n+y\n")
-        .files,
+      diffs: parseGitDiff(
+        "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-x\n+y\n",
+      ).files.map((d) => ({ diff: d })),
       openFindings: [],
       confirmedComments: [],
     });

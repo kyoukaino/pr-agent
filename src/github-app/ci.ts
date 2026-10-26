@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Octokit } from "@octokit/rest";
-import { CI_LOGS_MOUNT } from "../domain/tools.js";
+import { CI_LOGS_MOUNT } from "../domain/workspace.js";
 
 /**
  * CI context for a PR head commit, read from the GitHub Checks API (check runs and their

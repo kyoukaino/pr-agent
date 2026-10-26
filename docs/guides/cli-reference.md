@@ -25,22 +25,22 @@ Commands:
 
 ### 2.1 参数选项列表
 
-| 标志 / 参数               | 类型    | 默认值               | 说明                                                                         |
-| :------------------------ | :------ | :------------------- | :--------------------------------------------------------------------------- |
-| `-d, --diff <file>`       | string  | -                    | 待审查的 Git Diff 文件路径（与 `--git` 二选一必填）                          |
-| `--git`                   | boolean | false                | 自动从本地当前 Git 仓库提取变更 (`git diff HEAD~1..HEAD` 或 `git diff HEAD`) |
-| `-o, --owner <owner>`     | string  | `my-org`             | GitHub 仓库所有者 / 组织名                                                   |
-| `-r, --repo <repo>`       | string  | `my-repo`            | GitHub 仓库名称                                                              |
-| `-p, --pr <number>`       | number  | `1`                  | Pull Request 编号                                                            |
-| `-c, --commit <sha>`      | string  | `git rev-parse HEAD` | 目标 Commit SHA（用于 GitHub Review 锚定）                                   |
-| `-m, --model <name>`      | string  | `deepseek-flash`     | 指定模型 (`deepseek-flash`, `deepseek-v4-pro`)                               |
-| `--config <path>`         | string  | -                    | 显式指定配置文件路径（如 `./my-team.config.ts`）                             |
-| `-t, --temperature <num>` | number  | `0.1`                | 采样温度 (0.0 ~ 2.0)，代码审查推荐保持在 0.1                                 |
-| `-b, --background <text>` | string  | -                    | 业务/需求背景说明，注入初始提示词以提升审查针对性                            |
-| `--max-cost <usd>`        | number  | `1`                  | 单次审查的花费上限（美元），按剩余文件组数公平分配                           |
-| `--resume <runId>`        | string  | -                    | 从检查点恢复之前中断的审查任务（跳过已审查文件组）                           |
-| `--publish`               | boolean | false                | 审查完成后直接通过 GitHub REST API 提交 Review（需配置 `GITHUB_TOKEN`）      |
-| `--json`                  | boolean | false                | 以纯 JSON 格式输出最终 Review 载荷至标准输出（适用于 CI/CD）                 |
+| 标志 / 参数               | 类型    | 默认值               | 说明                                                                                                                        |
+| :------------------------ | :------ | :------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
+| `-d, --diff <file>`       | string  | -                    | 待审查的 Git Diff 文件路径（与 `--git` 二选一必填）                                                                         |
+| `--git`                   | boolean | false                | 自动从本地当前 Git 仓库提取变更（`HEAD~1..HEAD`；没有上一个提交时为 `HEAD` 与工作区的差异），并把改动前的文件挂载为 `@base` |
+| `-o, --owner <owner>`     | string  | `my-org`             | GitHub 仓库所有者 / 组织名                                                                                                  |
+| `-r, --repo <repo>`       | string  | `my-repo`            | GitHub 仓库名称                                                                                                             |
+| `-p, --pr <number>`       | number  | `1`                  | Pull Request 编号                                                                                                           |
+| `-c, --commit <sha>`      | string  | `git rev-parse HEAD` | 目标 Commit SHA（用于 GitHub Review 锚定）                                                                                  |
+| `-m, --model <name>`      | string  | `deepseek-flash`     | 指定模型 (`deepseek-flash`, `deepseek-v4-pro`)                                                                              |
+| `--config <path>`         | string  | -                    | 显式指定配置文件路径（如 `./my-team.config.ts`）                                                                            |
+| `-t, --temperature <num>` | number  | `0.1`                | 采样温度 (0.0 ~ 2.0)，代码审查推荐保持在 0.1                                                                                |
+| `-b, --background <text>` | string  | -                    | 业务/需求背景说明，注入初始提示词以提升审查针对性                                                                           |
+| `--max-cost <usd>`        | number  | `1`                  | 单次审查的花费上限（美元），按剩余文件组数公平分配                                                                          |
+| `--resume <runId>`        | string  | -                    | 从检查点恢复之前中断的审查任务（跳过已审查文件组）                                                                          |
+| `--publish`               | boolean | false                | 审查完成后直接通过 GitHub REST API 提交 Review（需配置 `GITHUB_TOKEN`）                                                     |
+| `--json`                  | boolean | false                | 以纯 JSON 格式输出最终 Review 载荷至标准输出（适用于 CI/CD）                                                                |
 
 ### 2.2 典型实战用例
 

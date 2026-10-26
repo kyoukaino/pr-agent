@@ -35,7 +35,7 @@ flowchart TD
     Judge --> Metrics["汇总 (bench/evaluate.ts) → metrics.json"]
 ```
 
-- **真实代码上下文**：默认 `--repo-mode checkout` 会检出 PR 的 head 版本，Agent 的 `read_file` / `grep_code` 读取的就是被审查的代码。`diff-only` 模式给出一个空目录，只用 Diff 审查。
+- **真实代码上下文**：默认 `--repo-mode checkout` 会检出 PR 的 head 版本，Agent 的 `read_file` / `grep_code` 读取的就是被审查的代码。`diff-only` 模式给出一个空目录，只用 Diff 审查。两种模式都挂载 `@pr`（PR 描述），checkout 模式还会抓取 merge base 并挂载 `@base`（改动前的文件），与 GitHub App 一致（见 [上下文管理](../architecture/context-management.md#42-审查工作区挂载目录)）；审查记录中的 `coverage` 给出从挂载读取的 diff 的 hunk 覆盖率。
 - **Diff 来源**：始终使用 GitHub 的三点 Diff（merge-base...head），也就是 PR 本身的改动。
 - **阶段解耦**：审查结果落盘后，可以只重跑评分阶段，例如更换 Judge 模型时不必重新审查。
 - **续跑**：复用同一个 `--run-id` 时，已成功的审查和已完成的评分会被跳过，未成功的实例重新执行；`--force` 强制重做。`run.json` 保留首次运行的版本与配置，每次续跑追加到 `resumes`。

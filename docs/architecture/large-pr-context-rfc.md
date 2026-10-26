@@ -1,11 +1,11 @@
 # RFC-002: 超大 PR 与审查上下文的访问方式
 
-- **状态**: 规划中（尚未实现）
+- **状态**: 阶段 0–4 已实现（2026-10）；阶段 5（`git_inspect`）规划中，按需引入
 - **相关文档**: [上下文管理](context-management.md)、[运行时架构](runtime-architecture.md)、[GitHub App 架构 RFC](github-app-deployment-rfc.md)
 
 > 本文讨论两个问题：PR 大到放不进一个对话时怎么审查；agent 需要 diff 之外的信息（改动前的代码、其他文件组的改动、提交意图、CI 日志）时通过什么方式访问。结论是统一用只读挂载目录暴露"某个版本下的文件"，只有跨版本才能算出的信息才考虑受限的 git 工具，并分阶段实现。
 
-## 1. 现状
+## 1. 实现前的状况
 
 | 环节       | 当前行为                                                                                                                                         | 源码                                          |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
@@ -75,13 +75,13 @@
 
 与 `@ci-logs` 一致：准备阶段写入临时目录，作为 `mounts` 交给 engine 与 `ToolDispatcher`，审查结束后清理。挂载内容是本次审查所基于版本的只读快照。
 
-| 入口       | `@pr-diff`      | `@base`                                                                                               | `@pr`                            |
-| ---------- | --------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------- |
-| GitHub App | 由 PR diff 生成 | 检出时额外抓取 merge base（`--depth=1`），用 `git show <base>:<path>` 或 sparse worktree 写出改动文件 | `pulls.get`、`pulls.listCommits` |
-| CLI        | 由 diff 生成    | `--git` 模式下从本地仓库读取；`--diff` 文件模式下没有                                                 | 无                               |
-| 基准评测   | 由 diff 生成    | 工作区已用 `git worktree`，可抓取 base 提交                                                           | 视数据集是否提供                 |
+| 入口       | `@pr-diff`      | `@base`                                                                                                             | `@pr`                            |
+| ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| GitHub App | 由 PR diff 生成 | 检出时额外抓取 merge base（`--depth=1`），用临时 index 执行 `git checkout <base> --pathspec-from-file` 写出改动文件 | `pulls.get`、`pulls.listCommits` |
+| CLI        | 由 diff 生成    | `--git` 模式下从本地仓库读取；`--diff` 文件模式下没有                                                               | 无                               |
+| 基准评测   | 由 diff 生成    | checkout 模式下抓取 merge base 写出；diff-only 模式下没有                                                           | 只有 `description.md`            |
 
-没有对应数据时不挂载，`<workspace>` 段中也不列出。
+没有对应数据时不挂载，`<workspace>` 段中也不列出。增量审查另有 `@incremental-diff`（自上次已审查提交以来的改动，结构同 `@pr-diff`），过大文件的 hunk 索引指向它。
 
 ### 3.3 Prompt 与缓存
 
@@ -126,45 +126,44 @@ git_inspect({
 
 ## 5. 实现阶段
 
-每个阶段独立可交付，并同步更新本文与相关文档的状态。阶段 1–4 不改变工具集；阶段 5 改变一次。
+阶段 0–4 已实现；实现后的行为说明见 [上下文管理](context-management.md#4-文件组审查工作区与初始任务) 与 [GitHub App 架构 RFC](github-app-deployment-rfc.md#34-独立临时工作区与安全克隆)。下面记录各阶段的落地方式、与原计划不同的决定，以及验收情况。实现顺序按依赖排列：先做挂载底座（阶段 0），再做依赖它的阶段 1–4；原计划中"先只做 API 失败时的本地回退"一步，因阶段 3 同时完成，直接以本地生成为默认、GitHub diff 为回退。
 
-### 阶段 0：挂载通用化（前置）
+### 阶段 0：挂载通用化 ✅
 
-- `ReviewPROptions.ciLogsDir` 推广为 `mounts: Record<string, string>`；GitHub App 的 CI 日志改为放入其中。
-- `buildInitialUserPrompt` 新增 `<workspace>` 段，列出挂载点及其含义与可信度；`buildFollowUpMessage` 提示挂载内容已更新。
-- `read_file` / `grep_code` 的工具说明改为通用措辞。
-- **验收**：现有测试通过；`@ci-logs` 行为不变；同一会话内的工具定义不变。
+- `ReviewPROptions.ciLogsDir` 改为 `mounts: Record<string, string>`，挂载名与说明集中在 `src/domain/workspace.ts`（`CI_LOGS_MOUNT` 等常量也移到这里）。
+- 初始任务新增 `<workspace>` 段，按固定顺序列出挂载点、用途与可信度；后续消息同样带上，提示内容已按新 head 重新生成。
+- `read_file` / `grep_code` 的工具说明改为指向 `<workspace>`。这是一次性的工具定义变化：部署后第一次请求的缓存前缀会失效一次。
 
-### 阶段 1：`@pr-diff` 与超大文件挂载
+### 阶段 1：`@pr-diff`、超大文件挂载与初始任务拆分 ✅
 
-- 由 `ParsedPRDiff` 生成 `@pr-diff/index.md` 与各文件的 `.diff`，三个入口都挂载。
-- `<other_changed_files_in_pr>` 改为指向 `@pr-diff/index.md`。
-- `too_large` 文件不再丢弃：单独成组，prompt 中只放 hunk 索引，由 agent 分段读取；`skippedFiles` 中改记为 `mounted_only`（或类似名称）。
-- `read_file` 对 `@pr-diff` 下的 `.diff` 文件不加行号前缀。
-- **验收**：跨组改动可被检索到并据此评论；超大文件的评论锚点能通过 relocator 校验；基准评测上召回率不下降、成本变化可解释。
+- 每次审查都生成 `@pr-diff`（以及增量审查的 `@incremental-diff`）：每个文件一份 `<path>.diff`，内容就是 promptDiff；`index.md` 列出全部文件、审查方式与每个 hunk 在 `.diff` 文件中的行范围（`DiffHunkRange` 新增 `promptStart` / `promptEnd`）。
+- 超大文件的阈值从 `maxContextTokens × warningWatermark` 改为组预算 `× 0.25`：介于两者之间的文件以前会整个内联、挤占压缩预算，现在同样单独成组、只放 hunk 索引。`skippedFiles` 的 `too_large` 取消，这类文件的审查方式记为 `oversized`。
+- `<other_changed_files_in_pr>` 改为 `<changed_files>`：每个文件一行（路径、增删行数、所在组、审查方式）。
+- **初始任务拆分**：审查级内容（背景、CI、挂载点、文件列表、历史发现）放在前面，组名及之后的本组内容放在后面，各组共享前缀缓存。
+- `read_file` 读取 diff 挂载中的文件时不加行号前缀；所有读取都在完整的行处截断，返回头中的行范围就是实际展示的行。
+- **验收**：单元测试覆盖挂载写出（含路径越界）、hunk 行范围、初始任务的共享前缀与 hunk 索引渲染、diff 挂载的读取。基准评测上的召回率与成本对比**尚未进行**。
 
-### 阶段 2：覆盖率统计与披露
+### 阶段 2：覆盖率统计与披露 ✅
 
-- 以 hunk 为单位：内联在某组 prompt 中，或被 `read_file` 读到的行范围覆盖，即算"已审查"。由 `ToolDispatcher` 记录读取范围，engine 汇总。
-- 未覆盖的 hunk 写入 Review 正文的"未审查"部分，并记入 `metrics_json` 与 trace。
-- **验收**：构造超大文件的测试中，未读的 hunk 出现在 Review 正文里；看板能显示覆盖率。
+- `ToolDispatcher` 通过 `onFileRead` 报告每次 `read_file` 实际返回的行范围，`CoverageTracker` 按 hunk 汇总；内联 diff 视为已覆盖。
+- 未读完的文件写入 Review 正文的 "Partially Reviewed" 小节（列出未读 hunk 的锚点范围），统计写入 `ReviewRunResult.coverage`、SQLite `metrics_json` 与基准评测的审查记录。看板目前没有专门展示覆盖率，可从 `metrics_json` 查看。
 
-### 阶段 3：本地生成 diff 与 `@base`
+### 阶段 3：本地生成 diff 与 `@base` ✅
 
-- GitHub App 检出时通过 compare API 取得 merge base SHA，额外抓取该提交（`--depth=1`），用 `git diff <mergeBase> <head>` 在本地生成 diff，不再依赖 `pulls.get` 的 diff 格式。增量审查的 diff 同样改为本地生成（`git diff <lastReviewed> <head>`，需要额外抓取上次已审查的提交），绕开 compare API 的 300 文件上限。
-- 本地生成 diff 时要和 GitHub 的口径一致：以 merge base 为基准，即三点比较；开启重命名检测，不使用会改变 hunk 划分的选项（如 `--diff-algorithm`、`-w`），保证锚点与 GitHub 一致。验收时要和 API 返回的 diff 逐个对比。
-- 写出改动文件的 base 版本，挂载为 `@base`；CLI 的 `--git` 模式与基准评测同样支持。
-- **验收**：超出 GitHub diff 上限的 PR 可以审查；本地生成的 diff 与 API 返回的 diff 在一般 PR 上一致（锚点相同）；删除和重命名文件在 `@base` 中可读。
+- `src/github-app/pr-context.ts`：通过 compare API 取得 merge base，与 head（增量审查时还有上次已审查的提交）一起浅抓取，然后在本地生成 PR diff 与增量 diff（`src/domain/git-snapshot.ts`）。提交抓取失败时回退到 GitHub 的 diff；增量 diff 拿不到时改为全量审查。
+- 本地 diff 忽略全局与系统 git 配置，显式指定 `--find-renames`、`--unified=3`、`a/` / `b/` 前缀、`core.quotePath=false`、`--no-ext-diff --no-textconv`，并为 `*.html` 指定 git 内置的 `html` diff 驱动（GitHub 也这样做，否则 HTML 文件 hunk 头部后的上下文文字会不同）。
+- `@base` 用临时 index 写出改动文件的旧版本，不触碰仓库自身的 index 与工作区；符号链接写成普通文件。GitHub App、CLI `--git` 与基准评测（checkout 模式）都提供。
+- **验收**：14 个真实 PR（`vitejs/vite` 9 个，含 34 个重命名的 PR；`spf13/cobra` 5 个）的本地 diff 与 GitHub 返回的 diff 在文件、hunk 与每一行上完全一致。331 个文件、GitHub 返回 406 的 `nodejs/node` PR 可以在本地生成完整 diff。
 
-### 阶段 4：分层处理与 `@pr`
+### 阶段 4：分层处理与 `@pr` ✅
 
-- 预算不足以覆盖全部文件组时按风险分层：核心逻辑内联审查；测试、文档、配置只挂载、按需查看；生成文件跳过。分层规则与触发阈值做成配置项（名称待定），分层结果写入 Review 正文。
-- 生成 `@pr/description.md`、`@pr/commits.md`，按不可信内容标注。
-- **验收**：在基准评测中挑出大 PR 子集，比较分层与平均分配预算两种方式的召回率与成本；Review 正文如实列出降级的文件。
+- 配置项 `review.maxInlineGroups`（默认 8，`0` 表示从不降级）：组数超过它时，测试与文档文件不再分组，改为按需审查，仍可从 `@pr-diff` 读取，并计入覆盖率。与原计划不同，配置文件**不**降级：配置会改变行为，CI 工作流也是安全面；`.github/` 下的文件一律不算低风险。全是低风险文件的 PR 照常全量审查。
+- `@pr/description.md`（PR 描述全文）与 `@pr/commits.md`（提交信息）按不可信内容标注；初始任务中的 `<requirement_background>`（标题与正文前 4000 字符）保持不变。
+- **验收**：默认值 8 尚未经基准评测校准；大 PR 子集上"分层"与"平均分配预算"的召回率与成本对比**尚未进行**。
 
 ### 阶段 5（按需）：`git_inspect`
 
-- 触发条件：阶段 3 上线后，trace 显示存在第 4 节所述的查询类需求。
+- 触发条件：trace 显示存在第 4 节所述的查询类需求。
 - 初期只开放 `blame`（限定 `base..head`）与 `log`；检出改为按 PR 提交数抓取历史。
 - 加入 `MAIN_TOOL_DEFINITIONS`，对所有模式一次性生效。已保存的 PR 会话恢复后第一轮会全量重算，之后恢复缓存命中；在 [上下文管理](context-management.md) 中注明。
 - **验收**：参数注入与 `.gitattributes` 外部程序的安全测试；同一会话内工具集保持不变。

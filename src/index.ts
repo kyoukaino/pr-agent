@@ -1,6 +1,9 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Octokit } from "@octokit/rest";
 import { isGeneratedOrLockfile, parseGitDiff } from "./domain/diff-parser.js";
-import { groupTokenBudget, partitionFileGroups } from "./domain/grouping.js";
+import { groupTokenBudget, isOversized, planFileGroups } from "./domain/grouping.js";
 import { DiffAnchorRelocator } from "./domain/relocator.js";
 import {
   buildFollowUpMessage,
@@ -8,6 +11,7 @@ import {
   buildReplyMessage,
   buildSystemPrompt,
   type PriorFinding,
+  type TargetFile,
 } from "./domain/prompt.js";
 import {
   routeToGroups,
@@ -16,7 +20,15 @@ import {
   type SessionGroup,
 } from "./domain/session.js";
 import type { ParsedFileDiff } from "./domain/diff-parser.js";
-import { CI_LOGS_MOUNT } from "./domain/tools.js";
+import {
+  DIFF_MOUNTS,
+  INCREMENTAL_DIFF_MOUNT,
+  PR_DIFF_MOUNT,
+  describeChangedFiles,
+  describeMounts,
+  writeDiffMount,
+} from "./domain/workspace.js";
+import { CoverageTracker, type CoverageSummary } from "./domain/coverage.js";
 import { ReviewPayloadAssembler } from "./domain/assembler.js";
 import { createLLMClient, type LLMClient } from "./llm/client.js";
 import { AgentRuntimeEngine, type ResolvedFinding } from "./runtime/engine.js";
@@ -27,7 +39,6 @@ import { initTelemetry, AgentTelemetry } from "./telemetry/otel.js";
 import { SqliteTraceStore } from "./telemetry/sqlite-store.js";
 import type { EmittedComment, PRAgentReviewPayload } from "./domain/github-types.js";
 import type { BudgetConfig } from "./runtime/budget.js";
-import { estimateTokens } from "./runtime/budget.js";
 import {
   PRAgentConfigSchema,
   type PRAgentConfig,
@@ -44,8 +55,11 @@ export interface ReviewPROptions {
   background?: string;
   /** Structured CI summary for the head commit (untrusted; rendered in a tagged prompt section). */
   ciResults?: string;
-  /** Directory of failed CI job logs, readable by the agent under CI_LOGS_MOUNT. */
-  ciLogsDir?: string;
+  /**
+   * Read-only directories by mount name (`@ci-logs`, `@base`, `@pr`; see domain/workspace.ts).
+   * The review adds its diff mounts (`@pr-diff`, `@incremental-diff`) itself.
+   */
+  mounts?: Record<string, string>;
   /** Findings posted by earlier reviews of this PR; the agent must not report them again. */
   previousFindings?: PriorFinding[];
   /**
@@ -79,7 +93,7 @@ export interface ReviewPROptions {
 
 export interface SkippedFile {
   path: string;
-  reason: "generated_or_lockfile" | "no_text_hunks" | "too_large";
+  reason: "generated_or_lockfile" | "no_text_hunks";
 }
 
 /** How one file group's review ended; anything but stopReason "none" means it was cut short. */
@@ -105,6 +119,8 @@ export interface ReviewRunResult {
   groups: GroupOutcome[];
   /** Open findings the agent verified as fixed. */
   resolvedFindings: ResolvedFinding[];
+  /** How much of the diffs reviewed from a mount the agent actually read. */
+  coverage: CoverageSummary;
   /** Conversations as they ended, to continue on the next push. */
   session: ReviewSession;
 }
@@ -124,6 +140,8 @@ export interface AnswerReplyOptions {
   reply: string;
   /** The PR's review conversations; the answer continues the one that reviewed the file. */
   session?: ReviewSession;
+  /** Read-only directories by mount name, as for a review; `@pr-diff` is added from rawDiff. */
+  mounts?: Record<string, string>;
   systemRule?: string;
   signal?: AbortSignal;
 }
@@ -178,6 +196,7 @@ export class PRAgent {
       `pr-${options.owner}-${options.repo}-${options.pull_number}`,
     );
 
+    let workspaceDir: string | undefined;
     try {
       return await AgentTelemetry.withSpan(runSpan, async () => {
         // 2. Parse Git Diff
@@ -195,29 +214,57 @@ export class PRAgent {
           ? `This PR was already reviewed at commit ${options.incremental.sinceCommit.slice(0, 7)}. The diffs below contain only the changes pushed since then; the rest of the PR was reviewed before. Review these changes, reading surrounding code as needed. Anchor findings on R<n> lines: L<n> here are lines of the previously reviewed commit, not of the PR base.`
           : undefined;
 
-        // 3. Pre-flight Size Filtering (exclude single files exceeding warning watermark of max context tokens)
+        // 3. Pre-flight filtering: generated files and files without text hunks are not reviewed.
         // this.config is schema-parsed, so its budget fields always carry the defaults.
         const maxContextTokens =
           options.budgetConfig?.maxContextTokens || this.config.budget.maxContextTokens;
         const warningWatermark =
           options.budgetConfig?.warningWatermark || this.config.budget.warningWatermark;
-        const promptTokenCeiling = Math.floor(maxContextTokens * warningWatermark);
 
         const skippedFiles: SkippedFile[] = [];
         const validDiffs = reviewFiles.filter((f) => {
           let reason: SkippedFile["reason"] | null = null;
           if (isGeneratedOrLockfile(f.path)) reason = "generated_or_lockfile";
           else if (f.hunkRanges.length === 0) reason = "no_text_hunks"; // binary, pure rename, mode change
-          else if (estimateTokens(f.promptDiff) > promptTokenCeiling) reason = "too_large";
           if (reason) skippedFiles.push({ path: f.path, reason });
           return reason === null;
         });
 
-        // 4. Group files: one group when the diff fits, token-bounded packing otherwise
-        const fileGroups = partitionFileGroups(
-          validDiffs,
-          groupTokenBudget(maxContextTokens, warningWatermark),
+        // 4. Group files: one group when the diff fits, token-bounded packing otherwise. A file too
+        // large for a prompt gets a group of its own that reads it from the diff mount; on large PRs
+        // low-risk files are left to on-demand review.
+        const groupBudget = groupTokenBudget(maxContextTokens, warningWatermark);
+        const plan = planFileGroups(validDiffs, groupBudget, this.config.review.maxInlineGroups);
+        const fileGroups = plan.groups;
+
+        // 4b. Workspace: the diff mounts next to the caller's (CI logs, base files, PR info). The
+        // diffs under review live in @incremental-diff for an incremental review, else @pr-diff.
+        const diffMount = options.incremental ? INCREMENTAL_DIFF_MOUNT : PR_DIFF_MOUNT;
+        const changedFiles = describeChangedFiles(prDiff.files, plan, skippedFiles);
+        workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-agent-ws-"));
+        const mounts: Record<string, string> = {
+          ...options.mounts,
+          [PR_DIFF_MOUNT]: path.join(workspaceDir, "pr-diff"),
+        };
+        writeDiffMount(
+          mounts[PR_DIFF_MOUNT],
+          PR_DIFF_MOUNT,
+          prDiff.files,
+          `Changes of PR #${options.pull_number} (merge base → ${options.commit_id.slice(0, 7)})`,
+          changedFiles,
+          fileGroups.length,
         );
+        if (options.incremental) {
+          mounts[INCREMENTAL_DIFF_MOUNT] = path.join(workspaceDir, "incremental-diff");
+          writeDiffMount(
+            mounts[INCREMENTAL_DIFF_MOUNT],
+            INCREMENTAL_DIFF_MOUNT,
+            reviewFiles,
+            `Changes pushed since ${options.incremental.sinceCommit.slice(0, 7)} (→ ${options.commit_id.slice(0, 7)})`,
+          );
+        }
+        const workspace = describeMounts(Object.keys(mounts));
+        const coverage = new CoverageTracker();
 
         // 5. Initialize Checkpoints & Resume State
         this.checkpointStore.appendEvent(runId, "RUN_START", {
@@ -266,11 +313,12 @@ export class PRAgent {
           maxRounds: this.config.limits.maxRounds,
           openFindingIds: options.openFindings?.map((f) => f.id),
           sessionTools: options.sessionTools,
-          mounts: options.ciLogsDir ? { [CI_LOGS_MOUNT]: options.ciLogsDir } : undefined,
+          mounts,
+          diffMounts: DIFF_MOUNTS,
+          onFileRead: (p, start, end) => coverage.recordRead(p, start, end),
           signal: options.signal,
         });
 
-        const allChangedPaths = prDiff.files.map((f) => f.path);
         const allComments: EmittedComment[] = resumeState
           ? [...resumeState.accumulatedComments]
           : [];
@@ -286,10 +334,13 @@ export class PRAgent {
         // (groups already completed before a resume are skipped).
         const continued = options.incremental ? options.session : undefined;
         const sessionGroups: SessionGroup[] = continued ? [...continued.groups] : [];
-        const tasks: { index: number; files: ParsedFileDiff[] }[] = [];
+        const tasks: { index: number; files: TargetFile[] }[] = [];
         if (continued) {
           for (const [index, files] of routeToGroups(sessionGroups, validDiffs)) {
-            tasks.push({ index, files });
+            const targets = files.map((diff) =>
+              isOversized(diff, groupBudget) ? { diff, mountedAt: diffMount } : { diff },
+            );
+            tasks.push({ index, files: targets });
           }
         } else {
           for (const group of fileGroups) {
@@ -299,14 +350,22 @@ export class PRAgent {
               paths: group.files.map((f) => f.path),
               messages: [],
             });
-            tasks.push({ index: sessionGroups.length - 1, files: group.files });
+            const targets = group.files.map((diff) =>
+              group.oversized ? { diff, mountedAt: diffMount } : { diff },
+            );
+            tasks.push({ index: sessionGroups.length - 1, files: targets });
           }
+          for (const f of plan.onDemand) coverage.trackMounted(diffMount, f, "on_demand");
         }
 
         const groups: GroupOutcome[] = [];
         const resolvedFindings: ResolvedFinding[] = [];
         for (const [i, task] of tasks.entries()) {
           const group = sessionGroups[task.index];
+          for (const t of task.files) {
+            if (t.mountedAt) coverage.trackMounted(t.mountedAt, t.diff, "oversized");
+            else coverage.trackInline(t.diff);
+          }
           const messages: ChatMessage[] = continued
             ? [
                 ...group.messages,
@@ -314,6 +373,7 @@ export class PRAgent {
                   commit: options.commit_id,
                   sinceCommit: continued.reviewedCommit,
                   diffs: task.files,
+                  workspace,
                   ciResults: options.ciResults,
                   openFindings: options.openFindings ?? [],
                   confirmedComments: allComments,
@@ -321,8 +381,10 @@ export class PRAgent {
               ]
             : buildMainTaskMessages({
                 groupLabel: group.label,
-                groupDiffs: task.files,
-                allChangedPaths,
+                groupFiles: task.files,
+                groupCount: fileGroups.length,
+                changedFiles,
+                workspace,
                 background: options.background,
                 ciResults: options.ciResults,
                 confirmedComments: allComments,
@@ -337,7 +399,7 @@ export class PRAgent {
           resolvedFindings.push(...res.resolved);
           sessionGroups[task.index] = {
             label: group.label,
-            paths: [...new Set([...group.paths, ...task.files.map((f) => f.path)])],
+            paths: [...new Set([...group.paths, ...task.files.map((f) => f.diff.path)])],
             messages: res.messages,
           };
           groups.push({
@@ -349,6 +411,7 @@ export class PRAgent {
             ...(res.error ? { error: res.error } : {}),
           });
         }
+        const coverageSummary = coverage.summary();
         const session: ReviewSession = {
           version: 1,
           model: this.llmClient.model,
@@ -370,6 +433,7 @@ export class PRAgent {
           maxCommentsPerReview:
             options.maxCommentsPerReview || this.config.review.maxCommentsPerReview,
           skippedFiles,
+          unreadFiles: coverageSummary.unreadFiles,
           incompleteGroups: groups.filter((g) => g.error).map((g) => g.group),
           stillOpen: options.openFindings?.filter(
             (f) => !resolvedFindings.some((r) => r.id === f.id),
@@ -424,6 +488,7 @@ export class PRAgent {
                 groupsCount: fileGroups.length,
                 skippedFiles,
                 groups,
+                coverage: coverageSummary,
               }),
             },
             traceRecorder.manifestSnapshot,
@@ -451,6 +516,7 @@ export class PRAgent {
           skippedFiles,
           groups,
           resolvedFindings,
+          coverage: coverageSummary,
           session,
         };
       });
@@ -459,6 +525,8 @@ export class PRAgent {
       runSpan.setAttribute("error", true);
       runSpan.end();
       throw err;
+    } finally {
+      if (workspaceDir) fs.rmSync(workspaceDir, { recursive: true, force: true });
     }
   }
 
@@ -467,7 +535,33 @@ export class PRAgent {
    * concedes (resolving the finding) or explains why the finding stands.
    */
   public async answerReply(options: AnswerReplyOptions): Promise<AnswerReplyResult> {
-    const changedPaths = parseGitDiff(options.rawDiff).files.map((f) => f.path);
+    const prFiles = parseGitDiff(options.rawDiff).files;
+    const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-agent-ws-"));
+    try {
+      return await this.runReplyAnswer(options, prFiles, workspaceDir);
+    } finally {
+      fs.rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  }
+
+  private async runReplyAnswer(
+    options: AnswerReplyOptions,
+    prFiles: ParsedFileDiff[],
+    workspaceDir: string,
+  ): Promise<AnswerReplyResult> {
+    // The conversation being continued lists the review's mounts; the diff and the caller's mounts
+    // are provided again so reads of them keep working.
+    const mounts: Record<string, string> = {
+      ...options.mounts,
+      [PR_DIFF_MOUNT]: path.join(workspaceDir, "pr-diff"),
+    };
+    writeDiffMount(
+      mounts[PR_DIFF_MOUNT],
+      PR_DIFF_MOUNT,
+      prFiles,
+      `Changes of PR #${options.pull_number} (merge base → ${options.commit_id.slice(0, 7)})`,
+    );
+    const changedPaths = prFiles.map((f) => f.path);
     const engine = new AgentRuntimeEngine({
       runId: `reply-${options.owner}-${options.repo}-${options.pull_number}-${Date.now()}`,
       repoDir: options.repoDir || process.cwd(),
@@ -479,6 +573,8 @@ export class PRAgent {
       openFindingIds: [options.finding.id],
       answeringReply: true,
       sessionTools: true,
+      mounts,
+      diffMounts: DIFF_MOUNTS,
       signal: options.signal,
     });
 
@@ -519,6 +615,8 @@ export * from "./domain/diff-parser.js";
 export * from "./domain/relocator.js";
 export * from "./domain/grouping.js";
 export * from "./domain/compression.js";
+export * from "./domain/workspace.js";
+export * from "./domain/coverage.js";
 export * from "./domain/assembler.js";
 export * from "./runtime/engine.js";
 export * from "./runtime/budget.js";

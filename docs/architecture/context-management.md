@@ -1,6 +1,6 @@
 # 上下文管理与行号锚定
 
-> 本文说明 PR-Agent 在多轮审查中如何管理上下文窗口（三区记忆压缩），以及如何保证评论行号能被 GitHub 接受。
+> 本文说明 PR-Agent 在多轮审查中如何管理上下文窗口（三区记忆压缩）、如何保证评论行号能被 GitHub 接受，以及文件组、审查工作区（挂载目录）和初始任务的结构。
 
 ## 1. 问题
 
@@ -25,7 +25,7 @@
 - **字符估算**：字符数 ÷ 2.35（`CHARS_PER_TOKEN`），是 DeepSeek 在代码类上下文上的实测系数；`reasoning_content` 不回传给 API，不计入。
 - **没有锚点时估算整个请求**：子任务的第一次调用、会话恢复后（会话文件不保存每条消息的 usage）、压缩改写历史之后（上一次的计数已作废）。此时还要加上工具定义的估算，它随每个请求发送但不在消息里。
 - **余量**：水位线之上留有 `maxContextTokens × (1 − warningWatermark)` 的窗口，取值时应让它大于一次工具输出的上限（40k 字符，约 17k token）。
-- **审查开始之前**还没有任何 API 返回值，文件过大过滤（单文件 diff 超过 `maxContextTokens × warningWatermark`）和文件组分组预算（`× 0.25`）也使用同一字符估算。
+- **审查开始之前**还没有任何 API 返回值，文件组分组预算（`× 0.25`，超过它的单个文件改为从挂载读取，见 [第 4 节](#4-文件组审查工作区与初始任务)）也使用同一字符估算。
 
 每次压缩都写入 trace 的 `compressions` 数组，见 [运行时架构](runtime-architecture.md#7-run-trace)。
 
@@ -123,3 +123,60 @@ GitHub 要求行内评论的行号必须落在 Diff 的 hunk 内，否则整个 
 1. **落在 hunk 内**：原样作为行内评论；多行评论的起始行也必须在同一个 hunk 内，否则退化为单行。
 2. **距离最近的 hunk 边缘不超过 15 行**：移到该边缘，并在正文注明原始行号；同时丢弃 suggestion 代码块，因为它会替换错误的行。
 3. **更远，或文件不在 Diff 中**：不作为行内评论，改写进 Review 正文的 "Findings Outside the Diff" 小节，问题不会丢失，Review 也能提交成功。
+
+## 4. 文件组、审查工作区与初始任务
+
+**源码**：[`src/domain/grouping.ts`](../../src/domain/grouping.ts)、[`src/domain/workspace.ts`](../../src/domain/workspace.ts)、[`src/domain/prompt.ts`](../../src/domain/prompt.ts)、[`src/domain/coverage.ts`](../../src/domain/coverage.ts)
+
+设计讨论与 GitHub diff 接口的实测限制见 [RFC-002](large-pr-context-rfc.md)。
+
+### 4.1 文件组
+
+生成文件 / lockfile 和没有文本 hunk 的文件（二进制、纯重命名、权限变更）不审查，记入 `skippedFiles`。其余文件按 `groupTokenBudget = maxContextTokens × warningWatermark × 0.25`（默认约 51k token）分组：
+
+- **diff 放得下**：只有一组，agent 一次看到全部改动。
+- **放不下**：按路径顺序贪心打包，每组一个对话，顺序执行。
+- **单个文件超过组预算（oversized）**：单独成组。初始任务里只放它的 hunk 索引（每个 hunk 的头部、`R<n>` 范围、在 `@pr-diff` 文件中的行范围），由 agent 用 `read_file` 分段读取。不会因为文件太大就跳过。
+- **组数超过 `review.maxInlineGroups`（默认 8）**：低风险文件（测试、文档；`.github/` 下的除外）不再分组，改为按需审查（on demand）。它们仍可从 `@pr-diff` 读取，不占用预算份额；全是低风险文件的 PR 照常全量审查。配置文件不算低风险，因为配置会改变行为，CI 工作流也是安全面。
+
+### 4.2 审查工作区（挂载目录）
+
+除 head 版本的代码外，agent 需要的其他内容都以只读目录的形式挂载在仓库旁边，统一用 `read_file` 读取、用 `grep_code`（`path` 指定该目录）搜索；默认的全仓库搜索不进入挂载目录。不新增工具，因此工具定义（缓存前缀）不随数据源变化。
+
+| 挂载点              | 内容                                                                                                                                                            | 提供方                                             | 可信度   |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | -------- |
+| `@pr-diff`          | 整个 PR 的改动：每个文件一份 `<path>.diff`（与 prompt 中相同的 `R<n>`/`L<n>` 锚点，可直接用于 `code_comment`），`index.md` 列出全部文件、审查方式与 hunk 行范围 | 每次审查自动生成                                   | 被审代码 |
+| `@incremental-diff` | 增量审查时，自上次已审查提交以来的改动，结构同上                                                                                                                | 增量审查自动生成                                   | 被审代码 |
+| `@base`             | merge base 版本中被修改、删除或重命名的文件（按旧路径）                                                                                                         | GitHub App、CLI `--git`、基准评测（checkout 模式） | 被审代码 |
+| `@pr`               | `description.md`（PR 描述全文）、`commits.md`（提交信息）                                                                                                       | GitHub App；基准评测只有描述                       | 不可信   |
+| `@ci-logs`          | 失败 CI 任务的日志                                                                                                                                              | GitHub App                                         | 不可信   |
+
+`read_file` 读取 `@pr-diff` / `@incremental-diff` 下的文件时不再加 `N | ` 行号前缀，避免与 `R<n>`/`L<n>` 锚点混淆。每次读取都在完整的行处截断（最多 400 行、40k 字符），返回头中的行范围就是实际展示的行。
+
+### 4.3 初始任务（Frozen 区 `[1]`）的结构
+
+初始任务分两段：前一段是整个审查共用的内容，各组逐字节相同；后一段是本组专有的内容。各组因此共享前缀缓存，直到组名出现的位置。
+
+```text
+[1] user
+    ┌ 审查级：所有组完全相同 ───────────────────────────
+    │ 开场说明（组数）
+    │ <requirement_background>   PR 标题与正文
+    │ <ci_results>               CI 摘要（不可信）
+    │ <workspace>                挂载目录、用途、可信度
+    │ <changed_files>            全部变更文件：增删行数、所在组、审查方式
+    │ <review_scope>             仅增量审查
+    │ <findings_from_previous_reviews> / <open_findings>
+    ├ 组级：本组专有 ───────────────────────────────────
+    │ Your file group: "<组名>"
+    │ <already_reported_findings_in_earlier_rounds>
+    │ <target_file_diffs>        每个文件：完整 diff，或 mode="mounted" 的 hunk 索引
+    │ 指令
+    └───────────────────────────────────────────────────
+```
+
+审查方式（`<changed_files>` 与 `index.md` 中相同）：`inline`（diff 在本组 prompt 中）、`oversized`（所在组从挂载读取）、`on demand`（不属于任何组，按需读取）、`previously reviewed`（增量审查中自上次审查以来未变）、`skipped`（不审查）。会话延续时追加的后续消息同样带 `<workspace>` 段，提示挂载内容已按新 head 重新生成。
+
+### 4.4 覆盖率
+
+从挂载读取的 diff（oversized、on demand）按 hunk 统计覆盖率：某个 hunk 的完整行范围（含头部）被 `read_file` 返回过（可以分多次）才算已读。内联的 diff 在 prompt 中，视为已覆盖。未读完的文件写入 Review 正文的 "Partially Reviewed" 小节，并列出未读 hunk 的锚点范围；统计结果写入 `ReviewRunResult.coverage`、SQLite 的 `metrics_json` 和基准评测的审查记录。
