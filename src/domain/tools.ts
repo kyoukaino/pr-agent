@@ -121,7 +121,7 @@ export const MAIN_TOOL_DEFINITIONS: OpenAI.Chat.Completions.ChatCompletionTool[]
     function: {
       name: "resolve_finding",
       description:
-        "Closes one of the findings listed under <open_findings> because the current code fixes it. Verify the fix in the code first; never use it for findings you merely disagree with now.",
+        "Closes a finding listed with an id under <prior_findings> because the current code fixes it. Verify the fix in the code first; never use it for findings you merely disagree with now.",
       parameters: {
         type: "object",
         required: ["id", "reason"],
@@ -389,7 +389,7 @@ export class ToolDispatcher {
     const reason = typeof args.reason === "string" ? args.reason.trim() : "";
     if (!this.ctx.openFindingIds?.has(id)) {
       throw new ToolInputError(
-        `'${id}' is not an open finding; use an id listed under <open_findings>`,
+        `'${id}' is not an open finding; use an id listed under <prior_findings>`,
       );
     }
     if (!reason) throw new ToolInputError("'reason' is required");

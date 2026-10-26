@@ -164,18 +164,18 @@ GitHub 要求行内评论的行号必须落在 Diff 的 hunk 内，否则整个 
     │ <requirement_background>   PR 标题与正文
     │ <ci_results>               CI 摘要（不可信）
     │ <workspace>                挂载目录、用途、可信度
-    │ <changed_files>            全部变更文件：增删行数、所在组、审查方式
+    │ <changed_files>            变更文件：增删行数、所在组、审查方式（只有一组时省去内联文件）
     │ <review_scope>             仅增量审查
-    │ <findings_from_previous_reviews> / <open_findings>
+    │ <prior_findings>           历史发现，仍开放的带 id（供 resolve_finding）
     ├ 组级：本组专有 ───────────────────────────────────
     │ Your file group: "<组名>"
-    │ <already_reported_findings_in_earlier_rounds>
+    │ <reported_in_this_review>  本次审查中前面各组已提交的发现
     │ <target_file_diffs>        每个文件：完整 diff，或 mode="mounted" 的 hunk 索引
     │ 指令
     └───────────────────────────────────────────────────
 ```
 
-审查方式（`<changed_files>` 与 `index.md` 中相同）：`inline`（diff 在本组 prompt 中）、`oversized`（所在组从挂载读取）、`on demand`（不属于任何组，按需读取）、`previously reviewed`（增量审查中自上次审查以来未变）、`skipped`（不审查）。会话延续时追加的后续消息同样带 `<workspace>` 段，提示挂载内容已按新 head 重新生成。
+审查方式（`<changed_files>` 与 `index.md` 中相同）：`inline`（diff 在本组 prompt 中）、`oversized`（所在组从挂载读取）、`on demand`（不属于任何组，按需读取）、`previously reviewed`（增量审查中自上次审查以来未变）、`skipped`（不审查）；`<changed_files>` 只解释列表中实际出现的方式，skipped 条目自带原因。只有一组时，内联文件就是末尾的 diff，不再重复列出。说明性文字各只出现一次：挂载点用法只在 `<workspace>` 开头说明；不可信的挂载点标 `(untrusted)`，含义在段末统一说明。会话延续时追加的后续消息同样带 `<workspace>` 段，提示挂载内容已按新 head 重新生成。
 
 ### 4.4 覆盖率
 

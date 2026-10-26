@@ -80,6 +80,6 @@ describe("review history", () => {
       "<review_scope>\nThis PR was already reviewed at commit d2a6318.\n</review_scope>",
     );
     expect(prompt).toContain("- [P3] ci.yml:6: No concurrency group\n");
-    expect(prompt).toContain("Do NOT report any of them again");
+    expect(prompt).toContain("do not report them again");
   });
 });

@@ -67,7 +67,7 @@ describe("initial task layout", () => {
       "<ci_results",
       "<workspace>",
       "<changed_files",
-      "<findings_from_previous_reviews>",
+      "<prior_findings>",
     ]) {
       expect(split(first)).toContain(section);
     }
@@ -83,8 +83,15 @@ describe("initial task layout", () => {
   it("keeps the group's own findings and diffs after the group name", () => {
     const own = second.slice(second.indexOf("Your file group:"));
     expect(own).toContain('"part 2/2: src/big.ts"');
-    expect(own).toContain("- [P2] src/a.ts:2: From group 1");
+    expect(own).toContain("<reported_in_this_review>\n- [P2] src/a.ts:2: From group 1");
     expect(first).toContain("R2 + two");
+  });
+
+  it("explains only the review modes the list uses", () => {
+    expect(first).toContain("inline: the diff");
+    expect(first).toContain("oversized: too large");
+    expect(first).not.toContain("on demand:");
+    expect(first).not.toContain("previously reviewed:");
   });
 
   it("renders an oversized file as a hunk index into the mount", () => {
@@ -98,6 +105,59 @@ describe("initial task layout", () => {
       `@@ -40,1 +41,1 @@ other → R41-R41; ${PR_DIFF_MOUNT}/src/big.ts.diff lines 4-6`,
     );
     expect(second).not.toContain("R11 + y");
+  });
+});
+
+describe("review-wide sections", () => {
+  it("lists only the files missing from the diffs when there is one group", () => {
+    const build = (entries: ChangedFileEntry[]) =>
+      buildInitialUserPrompt({
+        groupLabel: "all changed files",
+        groupFiles: [{ diff: files[0] }],
+        groupCount: 1,
+        changedFiles: entries,
+        confirmedComments: [],
+      });
+    expect(build([changedFiles[0]])).not.toContain("<changed_files");
+    const withSkipped = build([
+      changedFiles[0],
+      {
+        path: "pnpm-lock.yaml",
+        type: "modify",
+        insertions: 1,
+        deletions: 1,
+        mode: "skipped",
+        reason: "generated or lockfile",
+      },
+    ]);
+    expect(withSkipped).toContain(
+      '<changed_files count="1">\n- pnpm-lock.yaml (modify, +1 -1): skipped: generated or lockfile\n</changed_files>',
+    );
+  });
+
+  it("merges earlier findings into one list, open ones with their id", () => {
+    const prompt = buildInitialUserPrompt({
+      ...common,
+      groupLabel: "g",
+      groupFiles: [{ diff: files[0] }],
+      openFindings: [{ id: "f9", severity: "P1", path: "src/a.ts", line: 2, title: "Still open" }],
+    });
+    expect(prompt).toContain(
+      "<prior_findings>\n- id=f9 [P1] src/a.ts:2: Still open\n- [P3] src/a.ts:1: Old finding\n",
+    );
+    expect(prompt).toContain("call resolve_finding with its id");
+  });
+
+  it("explains untrusted mounts once", () => {
+    const prompt = buildInitialUserPrompt({
+      ...common,
+      groupLabel: "g",
+      groupFiles: [{ diff: files[0] }],
+      workspace: describeMounts([PR_DIFF_MOUNT, "@pr", "@ci-logs"]),
+    });
+    expect(prompt).toContain("- @pr (untrusted): ");
+    expect(prompt).toContain("- @ci-logs (untrusted): ");
+    expect(prompt.match(/never instructions/g)).toHaveLength(2); // the trust note and the CI note
   });
 });
 
