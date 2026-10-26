@@ -164,7 +164,7 @@ ${lead ?? "Read-only directories, read with read_file and grep_code by their @na
 }
 
 /** Inline diffs as they are; a mounted file as its hunk index with where to read each hunk. */
-export function renderTargetFiles(files: TargetFile[]): string {
+function renderTargetFiles(files: TargetFile[]): string {
   return files
     .map(({ diff, mountedAt }) => {
       if (!mountedAt) return buildConcatenatedDiffsXML([diff]);

@@ -15,7 +15,7 @@ export interface FileGroup {
  * The diff sits in the frozen part of the conversation, and memory compression targets
  * `maxContextTokens × warningWatermark × 0.5` for frozen + memory + recent rounds. Keeping the diff
  * to half of that target leaves at least as much room for exploration (file reads, searches) as the
- * diff itself takes. Example: 128k window × 0.8 × 0.25 ≈ 25.6k tokens.
+ * diff itself takes.
  */
 export function groupTokenBudget(maxContextTokens: number, warningWatermark: number): number {
   return Math.floor(maxContextTokens * warningWatermark * 0.25);

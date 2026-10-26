@@ -47,7 +47,7 @@ export default defineConfig({
   // 2. 资源预算控制器
   budget: {
     maxCostUsd: 1,
-    maxContextTokens: 128_000,
+    maxContextTokens: 256_000,
     softWatermark: 0.6,
     warningWatermark: 0.8,
     roundTimeoutMs: 300_000,
